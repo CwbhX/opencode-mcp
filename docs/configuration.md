@@ -32,6 +32,8 @@ server URL/auth, or you want a default / allowlisted model pair.
 
 ## MCP Client Configurations
 
+Use `github:CwbhX/opencode-mcp` in every `npx` / `npm` command. The bare name `opencode-mcp` is the npm registry package (upstream), not this fork.
+
 Below are complete configuration examples for every supported MCP client. All examples assume the OpenCode server is running on the default `http://127.0.0.1:4096` with no auth.
 
 ### Claude Desktop
@@ -46,7 +48,7 @@ Below are complete configuration examples for every supported MCP client. All ex
   "mcpServers": {
     "opencode": {
       "command": "npx",
-      "args": ["-y", "opencode-mcp"]
+      "args": ["-y", "github:CwbhX/opencode-mcp"]
     }
   }
 }
@@ -56,10 +58,10 @@ Below are complete configuration examples for every supported MCP client. All ex
 
 ```bash
 # Add globally
-claude mcp add opencode -- npx -y opencode-mcp
+claude mcp add opencode -- npx -y github:CwbhX/opencode-mcp
 
 # Add with custom env
-claude mcp add opencode --env OPENCODE_BASE_URL=http://192.168.1.10:4096 -- npx -y opencode-mcp
+claude mcp add opencode --env OPENCODE_BASE_URL=http://192.168.1.10:4096 -- npx -y github:CwbhX/opencode-mcp
 
 # Remove
 claude mcp remove opencode
@@ -74,7 +76,7 @@ claude mcp remove opencode
   "mcpServers": {
     "opencode": {
       "command": "npx",
-      "args": ["-y", "opencode-mcp"]
+      "args": ["-y", "github:CwbhX/opencode-mcp"]
     }
   }
 }
@@ -89,7 +91,7 @@ claude mcp remove opencode
   "mcpServers": {
     "opencode": {
       "command": "npx",
-      "args": ["-y", "opencode-mcp"]
+      "args": ["-y", "github:CwbhX/opencode-mcp"]
     }
   }
 }
@@ -106,7 +108,7 @@ claude mcp remove opencode
       "name": "opencode",
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "opencode-mcp"]
+      "args": ["-y", "github:CwbhX/opencode-mcp"]
     }
   ]
 }
@@ -117,7 +119,7 @@ claude mcp remove opencode
 Cline manages MCP servers through its own settings UI. Add a new server with:
 
 - **Command:** `npx`
-- **Args:** `-y opencode-mcp`
+- **Args:** `-y github:CwbhX/opencode-mcp`
 - **Transport:** stdio
 
 ### Continue
@@ -129,7 +131,7 @@ Cline manages MCP servers through its own settings UI. Add a new server with:
   "mcpServers": {
     "opencode": {
       "command": "npx",
-      "args": ["-y", "opencode-mcp"]
+      "args": ["-y", "github:CwbhX/opencode-mcp"]
     }
   }
 }
@@ -145,7 +147,7 @@ Cline manages MCP servers through its own settings UI. Add a new server with:
     "opencode": {
       "command": {
         "path": "npx",
-        "args": ["-y", "opencode-mcp"]
+        "args": ["-y", "github:CwbhX/opencode-mcp"]
       }
     }
   }
@@ -163,7 +165,7 @@ Cline manages MCP servers through its own settings UI. Add a new server with:
       "name": "opencode",
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "opencode-mcp"]
+      "args": ["-y", "github:CwbhX/opencode-mcp"]
     }
   ]
 }
@@ -178,7 +180,7 @@ Add `env` to any config above. This is only needed if you've enabled auth on the
   "mcpServers": {
     "opencode": {
       "command": "npx",
-      "args": ["-y", "opencode-mcp"],
+      "args": ["-y", "github:CwbhX/opencode-mcp"],
       "env": {
         "OPENCODE_BASE_URL": "http://127.0.0.1:4096",
         "OPENCODE_SERVER_USERNAME": "myuser",
@@ -194,7 +196,7 @@ Add `env` to any config above. This is only needed if you've enabled auth on the
 If you prefer a global install for faster startup:
 
 ```bash
-npm install -g opencode-mcp
+npm install -g github:CwbhX/opencode-mcp
 ```
 
 Then use `opencode-mcp` directly in your config:

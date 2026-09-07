@@ -26,6 +26,7 @@
     "test:live": "node scripts/opencode-live-smoke.mjs",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -44,11 +45,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AlaeddineMessadi/opencode-mcp.git"
+    "url": "git+https://github.com/CwbhX/opencode-mcp.git"
   },
-  "homepage": "https://github.com/AlaeddineMessadi/opencode-mcp#readme",
+  "homepage": "https://github.com/CwbhX/opencode-mcp#readme",
   "bugs": {
-    "url": "https://github.com/AlaeddineMessadi/opencode-mcp/issues"
+    "url": "https://github.com/CwbhX/opencode-mcp/issues"
   },
   "author": "Alaeddine Messadi",
   "license": "MIT",

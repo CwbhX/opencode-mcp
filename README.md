@@ -1,11 +1,12 @@
 # opencode-mcp
 
-[![npm version](https://img.shields.io/npm/v/opencode-mcp)](https://www.npmjs.com/package/opencode-mcp)
-[![license](https://img.shields.io/github/license/AlaeddineMessadi/opencode-mcp)](https://github.com/AlaeddineMessadi/opencode-mcp/blob/main/LICENSE)
-[![node](https://img.shields.io/node/v/opencode-mcp)](https://nodejs.org/)
-[![npm downloads](https://img.shields.io/npm/dm/opencode-mcp)](https://www.npmjs.com/package/opencode-mcp)
+[![license](https://img.shields.io/github/license/CwbhX/opencode-mcp)](https://github.com/CwbhX/opencode-mcp/blob/main/LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org/)
+[![GitHub last commit](https://img.shields.io/github/last-commit/CwbhX/opencode-mcp)](https://github.com/CwbhX/opencode-mcp)
 
 **Give any MCP client the power of [OpenCode](https://opencode.ai/).**
+
+This repository is the **[CwbhX/opencode-mcp](https://github.com/CwbhX/opencode-mcp)** fork of [AlaeddineMessadi/opencode-mcp](https://github.com/AlaeddineMessadi/opencode-mcp). Install it from GitHub. `npx opencode-mcp` and `npm i -g opencode-mcp` pull the **npm registry** package, which is upstream, not this fork.
 
 opencode-mcp is an MCP server that bridges your AI tools (Claude, Cursor, Windsurf, VS Code, etc.) to OpenCode's headless API. It lets your AI delegate real coding work — building features, debugging, refactoring, running tests — to OpenCode sessions that autonomously read, write, and execute code in your project.
 
@@ -31,7 +32,7 @@ a loopback fallback when the health probe is connection-refused.
 **Claude Code:**
 
 ```bash
-claude mcp add opencode -- npx -y opencode-mcp
+claude mcp add opencode -- npx -y github:CwbhX/opencode-mcp
 ```
 
 **Claude Desktop / Cursor / Windsurf / Cline / Continue** (add to your MCP config):
@@ -41,7 +42,7 @@ claude mcp add opencode -- npx -y opencode-mcp
   "mcpServers": {
     "opencode": {
       "command": "npx",
-      "args": ["-y", "opencode-mcp"]
+      "args": ["-y", "github:CwbhX/opencode-mcp"]
     }
   }
 }
@@ -225,7 +226,7 @@ generation, or config changed outside this MCP process.
 ## Development
 
 ```bash
-git clone https://github.com/AlaeddineMessadi/opencode-mcp.git
+git clone https://github.com/CwbhX/opencode-mcp.git
 cd opencode-mcp
 npm install
 npm run build

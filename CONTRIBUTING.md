@@ -87,4 +87,4 @@ src/
 
 ## Questions?
 
-Open an [issue](https://github.com/AlaeddineMessadi/opencode-mcp/issues) for questions, bugs, or feature requests.
+Open an [issue](https://github.com/CwbhX/opencode-mcp/issues) for questions, bugs, or feature requests.

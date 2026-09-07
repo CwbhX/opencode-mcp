@@ -27,10 +27,12 @@ when this MCP process exits.
 
 ## Step 2: Add to Your Client
 
+Use the GitHub package specifier so you get this fork. `npx opencode-mcp` installs the npm registry (upstream) package.
+
 **Claude Code:**
 
 ```bash
-claude mcp add opencode -- npx -y opencode-mcp
+claude mcp add opencode -- npx -y github:CwbhX/opencode-mcp
 ```
 
 **Claude Desktop / Cursor / Windsurf / Cline / Continue** — add to your MCP config file:
@@ -40,7 +42,7 @@ claude mcp add opencode -- npx -y opencode-mcp
   "mcpServers": {
     "opencode": {
       "command": "npx",
-      "args": ["-y", "opencode-mcp"]
+      "args": ["-y", "github:CwbhX/opencode-mcp"]
     }
   }
 }
@@ -53,7 +55,7 @@ See [Configuration](configuration.md) for all client configs (VS Code Copilot, Z
   "mcpServers": {
     "opencode": {
       "command": "npx",
-      "args": ["-y", "opencode-mcp"],
+      "args": ["-y", "github:CwbhX/opencode-mcp"],
       "env": {
         "OPENCODE_AUTO_SERVE": "false",
         "OPENCODE_BASE_URL": "http://127.0.0.1:4096"
@@ -119,7 +121,7 @@ auto-start another server. Add the same credentials the server expects:
   "mcpServers": {
     "opencode": {
       "command": "npx",
-      "args": ["-y", "opencode-mcp"],
+      "args": ["-y", "github:CwbhX/opencode-mcp"],
       "env": {
         "OPENCODE_SERVER_USERNAME": "myuser",
         "OPENCODE_SERVER_PASSWORD": "mypass"
@@ -132,7 +134,7 @@ auto-start another server. Add the same credentials the server expects:
 ### Tools not showing up
 
 - Restart the client after editing the config
-- Check that `npx opencode-mcp` runs without errors in a terminal
+- Check that `npx -y github:CwbhX/opencode-mcp` runs without errors in a terminal. Do not use `npx opencode-mcp`; that is the npm registry (upstream) package.
 - Make sure your MCP client supports tools
 
 ### Disable auto-start
