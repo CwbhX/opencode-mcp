@@ -33,6 +33,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { OpenCodeClient } from "./client.js";
 import { ensureServer } from "./server-manager.js";
 import { setModelDefaults } from "./helpers.js";
+import { validateStartupModelConfig } from "./model-selection.js";
 
 // Tool groups
 import { registerGlobalTools } from "./tools/global.js";
@@ -60,7 +61,15 @@ const autoServe = process.env.OPENCODE_AUTO_SERVE !== "false";
 const defaultProvider = process.env.OPENCODE_DEFAULT_PROVIDER;
 const defaultModel = process.env.OPENCODE_DEFAULT_MODEL;
 
-// Set global model defaults from env vars (used by applyModelDefaults() in tools)
+try {
+  validateStartupModelConfig();
+} catch (err) {
+  console.error(
+    `Fatal model configuration error: ${err instanceof Error ? err.message : String(err)}`,
+  );
+  process.exit(1);
+}
+
 setModelDefaults(defaultProvider, defaultModel);
 
 // Use env-var defaults in instruction examples; fall back to generic placeholders

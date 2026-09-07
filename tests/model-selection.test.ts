@@ -11,6 +11,7 @@ import {
   buildCommandBody,
   buildShellBody,
   buildSummarizeBody,
+  buildInitBody,
 } from "../src/model-selection.js";
 
 describe("resolveModelSelection", () => {
@@ -149,6 +150,30 @@ describe("resolveModelSelection", () => {
       }),
     ).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-6" });
   });
+
+  it("FUP-006: nonempty allowlist without a pair does not fall through to server-default or first-entry substitution", () => {
+    expect(() =>
+      resolveModelSelection({
+        allowedModels: ["opencode/muse-spark-1.3-contributor-free"],
+      }),
+    ).toThrow(IncompleteModelSelectionError);
+
+    expect(() =>
+      resolveModelSelection({
+        allowedModels: ["opencode/muse-spark-1.3-contributor-free"],
+        defaults: {},
+      }),
+    ).toThrow(/first allowlist entry is not substituted/i);
+  });
+
+  it("rejects whitespace-only identifiers instead of treating them as omitted defaults", () => {
+    expect(() =>
+      resolveModelSelection({ providerID: "  ", modelID: "muse" }),
+    ).toThrow(IncompleteModelSelectionError);
+    expect(() =>
+      resolveModelSelection({ providerID: "opencode", modelID: "\t" }),
+    ).toThrow(IncompleteModelSelectionError);
+  });
 });
 
 describe("parseAllowedModels", () => {
@@ -226,6 +251,11 @@ describe("buildPromptBody", () => {
     );
   });
 
+  it("rejects empty variant on prompt instead of omitting it by truthiness", () => {
+    expect(() => buildPromptBody({ prompt: "hi", variant: "" })).toThrow(/variant/);
+    expect(() => buildPromptBody({ prompt: "hi", variant: "  " })).toThrow(/variant/);
+  });
+
   it("includes optional prompt fields when they are specified", () => {
     expect(
       buildPromptBody({
@@ -261,8 +291,11 @@ describe("buildCommandBody", () => {
     expect(body.messageID).toBe("msg_1");
   });
 
-  it("omits unspecified optional fields", () => {
-    expect(buildCommandBody({ command: "init" })).toEqual({ command: "init" });
+  it("always includes an arguments string, defaulting omitted arguments to empty", () => {
+    expect(buildCommandBody({ command: "init" })).toEqual({
+      command: "init",
+      arguments: "",
+    });
   });
 });
 
@@ -310,6 +343,51 @@ describe("buildSummarizeBody", () => {
       providerID: "opencode",
       modelID: "muse-spark-1.3-contributor-free",
     });
+  });
+});
+
+describe("buildInitBody", () => {
+  it("FUP-003: emits only messageID, providerID, and modelID", () => {
+    expect(
+      buildInitBody({
+        messageID: "msg_init",
+        providerID: "opencode",
+        modelID: "muse-spark-1.3-contributor-free",
+      }),
+    ).toEqual({
+      messageID: "msg_init",
+      providerID: "opencode",
+      modelID: "muse-spark-1.3-contributor-free",
+    });
+  });
+
+  it("rejects any explicit variant, including empty string", () => {
+    expect(() =>
+      buildInitBody({
+        messageID: "msg_init",
+        providerID: "opencode",
+        modelID: "muse-spark-1.3-contributor-free",
+        variant: "max",
+      }),
+    ).toThrow(UnsupportedParameterError);
+    expect(() =>
+      buildInitBody({
+        messageID: "msg_init",
+        providerID: "opencode",
+        modelID: "muse-spark-1.3-contributor-free",
+        variant: "",
+      }),
+    ).toThrow(UnsupportedParameterError);
+  });
+
+  it("rejects a messageID that does not start with msg", () => {
+    expect(() =>
+      buildInitBody({
+        messageID: "usr_1",
+        providerID: "opencode",
+        modelID: "muse-spark-1.3-contributor-free",
+      }),
+    ).toThrow(/messageID/);
   });
 });
 

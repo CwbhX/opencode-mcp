@@ -98,6 +98,7 @@ describe("MODEL-04 variant-only stays top-level", () => {
       variant: "max",
     });
     expect(commandBody.variant).toBe("max");
+    expect(commandBody.arguments).toBe("");
     expect(commandBody).not.toHaveProperty("model");
   });
 });

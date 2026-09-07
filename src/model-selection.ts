@@ -3,6 +3,7 @@ import {
   IncompleteModelSelectionError,
   UnsupportedParameterError,
 } from "./bridge-types.js";
+import { isValidMessageId } from "./opencode-id.js";
 
 export type { ModelSelection };
 
@@ -19,8 +20,12 @@ export interface ResolveModelOptions {
   allowedModels?: readonly string[];
 }
 
-function isPresent(value?: string): value is string {
-  return typeof value === "string" && value.length > 0;
+type IdentifierKind = "omitted" | "invalid" | "present";
+
+function identifierKind(value?: string): IdentifierKind {
+  if (value === undefined) return "omitted";
+  if (typeof value !== "string" || value.trim().length === 0) return "invalid";
+  return "present";
 }
 
 function assertAllowed(
@@ -39,37 +44,89 @@ function assertAllowed(
   return selection;
 }
 
+function resolvePair(
+  providerID: string | undefined,
+  modelID: string | undefined,
+  label: string,
+): ModelSelection {
+  const providerKind = identifierKind(providerID);
+  const modelKind = identifierKind(modelID);
+
+  if (providerKind === "invalid" || modelKind === "invalid") {
+    throw new IncompleteModelSelectionError(
+      `Empty or whitespace-only ${label} identifiers are invalid. ` +
+        "They are not treated as a request to use defaults.",
+    );
+  }
+  if (providerKind === "present" && modelKind === "present") {
+    return { providerID: providerID!, modelID: modelID! };
+  }
+  if (providerKind === "present" || modelKind === "present") {
+    throw new IncompleteModelSelectionError(
+      `Both providerID and modelID are required when selecting a model (${label}). ` +
+        "A single identifier is not merged with defaults.",
+    );
+  }
+  throw new IncompleteModelSelectionError(
+    `No ${label} providerID/modelID pair was provided.`,
+  );
+}
+
 export function resolveModelSelection(
   opts: ResolveModelOptions,
 ): ModelSelection | undefined {
-  const callerProvider = opts.providerID;
-  const callerModel = opts.modelID;
+  const callerProviderKind = identifierKind(opts.providerID);
+  const callerModelKind = identifierKind(opts.modelID);
 
-  if (isPresent(callerProvider) && isPresent(callerModel)) {
+  if (callerProviderKind === "invalid" || callerModelKind === "invalid") {
+    throw new IncompleteModelSelectionError(
+      "Empty or whitespace-only identifiers are invalid. " +
+        "They are not treated as a request to use defaults.",
+    );
+  }
+
+  if (callerProviderKind === "present" && callerModelKind === "present") {
     return assertAllowed(
-      { providerID: callerProvider, modelID: callerModel },
+      { providerID: opts.providerID!, modelID: opts.modelID! },
       opts.allowedModels,
     );
   }
-  if (isPresent(callerProvider) || isPresent(callerModel)) {
+  if (callerProviderKind === "present" || callerModelKind === "present") {
     throw new IncompleteModelSelectionError(
       "Both providerID and modelID are required when selecting a model. " +
         "A single identifier is not merged with defaults.",
     );
   }
 
-  const defaultProvider = opts.defaults?.providerID;
-  const defaultModel = opts.defaults?.modelID;
+  const defaultProviderKind = identifierKind(opts.defaults?.providerID);
+  const defaultModelKind = identifierKind(opts.defaults?.modelID);
 
-  if (isPresent(defaultProvider) && isPresent(defaultModel)) {
+  if (defaultProviderKind === "invalid" || defaultModelKind === "invalid") {
+    throw new IncompleteModelSelectionError(
+      "Model defaults must be nonempty strings; whitespace-only values are invalid.",
+    );
+  }
+
+  if (defaultProviderKind === "present" && defaultModelKind === "present") {
     return assertAllowed(
-      { providerID: defaultProvider, modelID: defaultModel },
+      {
+        providerID: opts.defaults!.providerID!,
+        modelID: opts.defaults!.modelID!,
+      },
       opts.allowedModels,
     );
   }
-  if (isPresent(defaultProvider) || isPresent(defaultModel)) {
+  if (defaultProviderKind === "present" || defaultModelKind === "present") {
     throw new IncompleteModelSelectionError(
       "Model defaults must include both providerID and modelID.",
+    );
+  }
+
+  const allowed = opts.allowedModels ?? [];
+  if (allowed.length > 0) {
+    throw new IncompleteModelSelectionError(
+      "A nonempty allowlist requires an explicit or configured providerID/modelID pair. " +
+        "Omitting the pair does not permit server-default selection, and the first allowlist entry is not substituted.",
     );
   }
 
@@ -99,8 +156,98 @@ export function parseAllowedModels(raw?: string): string[] {
   return parsed;
 }
 
+export function configuredModelOptions(): ResolveModelOptions {
+  return {
+    defaults: {
+      providerID: process.env.OPENCODE_DEFAULT_PROVIDER,
+      modelID: process.env.OPENCODE_DEFAULT_MODEL,
+    },
+    requireExplicit: process.env.OPENCODE_REQUIRE_EXPLICIT_MODEL === "true",
+    allowedModels: parseAllowedModels(process.env.OPENCODE_ALLOWED_MODELS),
+  };
+}
+
+export function resolveConfiguredModel(opts: {
+  providerID?: string;
+  modelID?: string;
+}): ModelSelection | undefined {
+  return resolveModelSelection({
+    ...configuredModelOptions(),
+    providerID: opts.providerID,
+    modelID: opts.modelID,
+  });
+}
+
+export function assertModelPolicy(selection: ModelSelection): ModelSelection {
+  return resolveModelSelection({
+    ...configuredModelOptions(),
+    providerID: selection.providerID,
+    modelID: selection.modelID,
+  })!;
+}
+
+export function validateStartupModelConfig(): void {
+  parseAllowedModels(process.env.OPENCODE_ALLOWED_MODELS);
+  const providerKind = identifierKind(process.env.OPENCODE_DEFAULT_PROVIDER);
+  const modelKind = identifierKind(process.env.OPENCODE_DEFAULT_MODEL);
+  if (providerKind === "invalid" || modelKind === "invalid") {
+    throw new IncompleteModelSelectionError(
+      "OPENCODE_DEFAULT_PROVIDER and OPENCODE_DEFAULT_MODEL must be nonempty when set.",
+    );
+  }
+  if (providerKind === "present" && modelKind === "present") {
+    assertAllowed(
+      {
+        providerID: process.env.OPENCODE_DEFAULT_PROVIDER!,
+        modelID: process.env.OPENCODE_DEFAULT_MODEL!,
+      },
+      parseAllowedModels(process.env.OPENCODE_ALLOWED_MODELS),
+    );
+    return;
+  }
+  if (providerKind === "present" || modelKind === "present") {
+    throw new IncompleteModelSelectionError(
+      "Model defaults must include both OPENCODE_DEFAULT_PROVIDER and OPENCODE_DEFAULT_MODEL.",
+    );
+  }
+}
+
 export function formatProviderQualified(model: ModelSelection): string {
   return `${model.providerID}/${model.modelID}`;
+}
+
+function assertString(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${field} must be a string.`);
+  }
+  return value;
+}
+
+function optionalSupportedVariant(
+  variant: string | undefined,
+  operation: string,
+): string | undefined {
+  if (variant === undefined) return undefined;
+  const value = assertString(variant, "variant");
+  if (value.trim().length === 0) {
+    throw new Error(
+      `Invalid variant for ${operation}: empty or whitespace-only values are not allowed.`,
+    );
+  }
+  return value;
+}
+
+function rejectUnsupportedVariant(
+  variant: string | undefined,
+  operation: string,
+): void {
+  if (variant !== undefined) {
+    throw new UnsupportedParameterError(
+      `variant is not supported for ${operation}`,
+      "variant",
+      operation,
+    );
+  }
 }
 
 export function buildPromptBody(input: {
@@ -122,8 +269,9 @@ export function buildPromptBody(input: {
       modelID: input.model.modelID,
     };
   }
-  if (input.variant) {
-    body.variant = input.variant;
+  const variant = optionalSupportedVariant(input.variant, "prompt");
+  if (variant !== undefined) {
+    body.variant = variant;
   }
   if (input.agent !== undefined) {
     body.agent = input.agent;
@@ -149,18 +297,21 @@ export function buildCommandBody(input: {
   agent?: string;
   messageID?: string;
 }): Record<string, unknown> {
+  if (input.arguments !== undefined && typeof input.arguments !== "string") {
+    throw new Error("command arguments must be a string.");
+  }
+
   const body: Record<string, unknown> = {
     command: input.command,
+    arguments: input.arguments ?? "",
   };
 
-  if (input.arguments !== undefined) {
-    body.arguments = input.arguments;
-  }
   if (input.model) {
     body.model = formatProviderQualified(input.model);
   }
-  if (input.variant) {
-    body.variant = input.variant;
+  const variant = optionalSupportedVariant(input.variant, "command");
+  if (variant !== undefined) {
+    body.variant = variant;
   }
   if (input.agent !== undefined) {
     body.agent = input.agent;
@@ -172,23 +323,13 @@ export function buildCommandBody(input: {
   return body;
 }
 
-function rejectVariant(variant: string | undefined, operation: string): void {
-  if (variant) {
-    throw new UnsupportedParameterError(
-      `variant is not supported for ${operation}`,
-      "variant",
-      operation,
-    );
-  }
-}
-
 export function buildShellBody(input: {
   command: string;
   agent: string;
   model?: ModelSelection;
   variant?: string;
 }): Record<string, unknown> {
-  rejectVariant(input.variant, "shell");
+  rejectUnsupportedVariant(input.variant, "shell");
 
   const body: Record<string, unknown> = {
     command: input.command,
@@ -209,14 +350,35 @@ export function buildSummarizeBody(input: {
   variant?: string;
   auto?: boolean;
 }): Record<string, unknown> {
-  rejectVariant(input.variant, "summarize");
+  rejectUnsupportedVariant(input.variant, "summarize");
+  const selected = resolvePair(input.providerID, input.modelID, "summarize");
 
   const body: Record<string, unknown> = {
-    providerID: input.providerID,
-    modelID: input.modelID,
+    providerID: selected.providerID,
+    modelID: selected.modelID,
   };
   if (input.auto !== undefined) {
     body.auto = input.auto;
   }
   return body;
+}
+
+export function buildInitBody(input: {
+  messageID: string;
+  providerID: string;
+  modelID: string;
+  variant?: string;
+}): Record<string, unknown> {
+  rejectUnsupportedVariant(input.variant, "init");
+  if (typeof input.messageID !== "string" || !isValidMessageId(input.messageID)) {
+    throw new Error(
+      `Invalid messageID for init: expected an OpenCode message id starting with "msg".`,
+    );
+  }
+  const selected = resolvePair(input.providerID, input.modelID, "init");
+  return {
+    messageID: input.messageID,
+    providerID: selected.providerID,
+    modelID: selected.modelID,
+  };
 }
