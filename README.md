@@ -20,6 +20,11 @@ opencode-mcp is an MCP server that bridges your AI tools (Claude, Cursor, Windsu
 
 ## Quick Start
 
+Prefer a **separately managed** `opencode serve` on loopback, then point this
+bridge at it with `OPENCODE_AUTO_SERVE=false`. See
+[Recommended deployment](#recommended-deployment). Optional auto-start is only
+a loopback fallback when the health probe is connection-refused.
+
 > **Prerequisite:** [OpenCode](https://opencode.ai/) must be installed.
 > `curl -fsSL https://opencode.ai/install | bash` or `npm i -g opencode-ai` or `brew install sst/tap/opencode`
 
@@ -173,11 +178,25 @@ All optional. Only needed if you've changed defaults on the OpenCode server.
 | `OPENCODE_BASE_URL` | `http://127.0.0.1:4096` | OpenCode server URL |
 | `OPENCODE_SERVER_USERNAME` | `opencode` | HTTP basic auth username |
 | `OPENCODE_SERVER_PASSWORD` | *(none)* | HTTP basic auth password (enables auth when set) |
-| `OPENCODE_AUTO_SERVE` | `true` | Auto-start an SDK **child** on loopback only when the health probe is connection-refused. 401 does not spawn. |
+| `OPENCODE_AUTO_SERVE` | `true` | Auto-start an SDK **child** on loopback only when the health probe is connection-refused. 401, HTML, TLS/DNS, and generic `fetch failed` do not spawn. |
 | `OPENCODE_DEFAULT_PROVIDER` | *(none)* | Default provider ID; must be set together with `OPENCODE_DEFAULT_MODEL` |
 | `OPENCODE_DEFAULT_MODEL` | *(none)* | Default model ID; must be set together with `OPENCODE_DEFAULT_PROVIDER` |
 | `OPENCODE_REQUIRE_EXPLICIT_MODEL` | *(unset)* | When `true`, require an explicit or configured full provider/model pair |
-| `OPENCODE_ALLOWED_MODELS` | *(unset)* | JSON array of allowed `provider/model` strings; no paid fallback |
+| `OPENCODE_ALLOWED_MODELS` | *(unset)* | JSON array of allowed `provider/model` strings. A nonempty list cannot be bypassed by omitting the pair, and the first entry is not substituted. |
+
+## Recommended deployment
+
+Prefer a **separately managed** `opencode serve` and point this bridge at it:
+
+```bash
+opencode serve --port 4096 --hostname 127.0.0.1
+```
+
+Then run the MCP server with `OPENCODE_AUTO_SERVE=false` and `OPENCODE_BASE_URL=http://127.0.0.1:4096`. In-memory `jobId` handles do not survive MCP exit; recover with `sessionId` + `requestMessageID` + `directory`. Optional loopback auto-start is only for a genuine connection refusal on `127.0.0.1` / `localhost` / `::1`.
+
+Do not set global OpenCode `permission: allow` to make headless tests pass. Reply to permission and question blocks explicitly.
+
+This bridge is verified on local macOS loopback. Remote/Windows filesystems are out of scope. Literal `%` path segments stay rejected.
 
 ## Development
 
@@ -188,11 +207,19 @@ npm install
 npm run build
 npm start        # run the MCP server
 npm run dev      # watch mode
-npm test         # unit + Layer B wire
+npm test         # unit + integration files that are not opted-in C/D
 npm run test:unit
-npm run test:wire
-npm run test:server   # skips unless OPENCODE_MCP_SERVER_TEST=1
-npm run test:live     # skips unless OPENCODE_MCP_LIVE_TEST=1
+npm run test:wire    # HTTP-client fake + real MCP stdio vs fake OpenCode (builds first)
+npm run test:server  # Layer C: skips unless OPENCODE_MCP_SERVER_TEST=1
+npm run test:live    # Layer D: skip without opt-in; missing config with opt-in fails
+```
+
+Tagged OpenCode integration (fails, does not skip, when opted in without the binary):
+
+```bash
+OPENCODE_MCP_SERVER_BINARY=/absolute/path/to/opencode-1.18.29 \
+OPENCODE_MCP_SERVER_TEST=1 \
+npm run test:server
 ```
 
 ### Smoke Testing
@@ -201,9 +228,12 @@ Opt-in live model smoke (scratch directory, not this repo):
 
 ```bash
 OPENCODE_MCP_LIVE_TEST=1 \
+OPENCODE_AUTO_SERVE=false \
 OPENCODE_BASE_URL=http://127.0.0.1:4096 \
 OPENCODE_DEFAULT_PROVIDER=opencode \
-OPENCODE_DEFAULT_MODEL=your-model-id \
+OPENCODE_DEFAULT_MODEL=muse-spark-1.3-contributor-free \
+OPENCODE_REQUIRE_EXPLICIT_MODEL=true \
+OPENCODE_ALLOWED_MODELS='["opencode/muse-spark-1.3-contributor-free"]' \
 npm run test:live
 ```
 

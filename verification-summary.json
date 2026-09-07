@@ -1,0 +1,260 @@
+{
+  "bridgeCommit": "bd206a35ab192e866950c98ef2218a5f8a4954a1",
+  "reviewedCommit": "bd206a35ab192e866950c98ef2218a5f8a4954a1",
+  "workingTreeDirty": true,
+  "dirtyTreeFingerprintSha256": "38186f2049cffdaff38bf897fb72f159e49ff942019672fea536b174dab777cd",
+  "builtFromCurrentSource": true,
+  "recordedAt": "2026-09-07T05:14:00Z",
+  "environment": {
+    "os": "Darwin",
+    "arch": "arm64",
+    "uname": "Darwin arm64",
+    "node": "v25.1.0",
+    "npm": "11.6.2"
+  },
+  "dependencies": {
+    "mcpSdkRange": "^1.12.1",
+    "mcpSdk": "1.26.0",
+    "opencodeSdkRange": "^1.14.46",
+    "opencodeSdk": "1.14.46",
+    "zod": "3.25.76",
+    "typescript": "5.9.3",
+    "vitest": "4.0.18"
+  },
+  "opencode": {
+    "regressionTarget": "1.18.29",
+    "pathBinary": "/Users/clement/.opencode/bin/opencode",
+    "pathBinaryVersion": "1.17.18",
+    "binaryVersion": null,
+    "healthVersion": null,
+    "fixtureConfigHash": null,
+    "notes": "PATH OpenCode is 1.17.18 and is not the Layer C target. No OPENCODE_MCP_SERVER_BINARY for 1.18.29 was provided. opencode.ai/changelog still listed v1.18.29 among current Core notes when checked; the page is mutable."
+  },
+  "preservedFindings": {
+    "final401AlreadyBlocksSpawn": true,
+    "taskManagerClockAlreadyInjectable": true
+  },
+  "commands": [
+    {
+      "cmd": "npx tsc --noEmit",
+      "exitCode": 0
+    },
+    {
+      "cmd": "npm run test:unit",
+      "exitCode": 0,
+      "passed": 591,
+      "failed": 0,
+      "skipped": 1,
+      "files": "20 passed"
+    },
+    {
+      "cmd": "npm run test:wire",
+      "exitCode": 0,
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0,
+      "notes": "build + http-transport-wire (7) + mcp-stdio (7)"
+    },
+    {
+      "cmd": "npm run test:server",
+      "exitCode": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 2,
+      "status": "skipped",
+      "notes": "No OPENCODE_MCP_SERVER_TEST=1. A skip is not a Layer C pass."
+    },
+    {
+      "cmd": "OPENCODE_MCP_SERVER_TEST=1 npm run test:server",
+      "exitCode": 1,
+      "passed": 0,
+      "failed": 2,
+      "skipped": 0,
+      "status": "failed",
+      "notes": "Opt-in without OPENCODE_MCP_SERVER_BINARY fails rather than skips (FUP-055)."
+    },
+    {
+      "cmd": "npm run test:live",
+      "exitCode": 0,
+      "status": "skipped",
+      "notes": "Labeled skip JSON; not a live pass."
+    },
+    {
+      "cmd": "OPENCODE_MCP_LIVE_TEST=1 npm run test:live",
+      "exitCode": 1,
+      "status": "failed",
+      "notes": "Opt-in with missing OPENCODE_BASE_URL / provider / model is a configuration failure."
+    },
+    {
+      "cmd": "npm pack --dry-run --json",
+      "exitCode": 0,
+      "filename": "opencode-mcp-1.12.0.tgz",
+      "fileCount": 89,
+      "includes": ["README.md", "LICENSE", "docs/compatibility.md"]
+    },
+    {
+      "cmd": "npm audit --json",
+      "exitCode": 1,
+      "vulnerabilities": {
+        "info": 0,
+        "low": 2,
+        "moderate": 2,
+        "high": 11,
+        "critical": 1,
+        "total": 16
+      }
+    },
+    {
+      "cmd": "npm audit --omit=dev --json",
+      "exitCode": 1,
+      "vulnerabilities": {
+        "info": 0,
+        "low": 1,
+        "moderate": 2,
+        "high": 6,
+        "critical": 0,
+        "total": 9
+      }
+    }
+  ],
+  "gates": {
+    "A": {
+      "status": "passed",
+      "passed": 591,
+      "failed": 0,
+      "skipped": 1,
+      "command": "npm run test:unit"
+    },
+    "B": {
+      "status": "passed",
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0,
+      "command": "npm run test:wire",
+      "notes": "HTTP-client fake plus real node dist/index.js MCP stdio against a strict fake OpenCode. Not a real OpenCode process."
+    },
+    "C": {
+      "status": "blocked_environment",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 2,
+      "command": "npm run test:server",
+      "notes": "Default run skipped. Opt-in without binary exits 1. No v1.18.29 executable in this environment. FUP-056 localhost provider fixture is not implemented."
+    },
+    "D": {
+      "status": "not_run",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1,
+      "command": "npm run test:live",
+      "notes": "No owner-authorized live credentials in this session. Skip without opt-in (exit 0) and missing-config failure (exit 1) were verified. FUP-060 fire→wait against muse-spark-1.3-contributor-free was not executed."
+    }
+  },
+  "liveModel": {
+    "requested": "opencode/muse-spark-1.3-contributor-free",
+    "observed": null,
+    "outcome": "not_run"
+  },
+  "audit": {
+    "total": 16,
+    "productionOmitDev": 9,
+    "productionPath": "@modelcontextprotocol/sdk@1.26.0",
+    "triage": [
+      {
+        "name": "hono / @hono/node-server",
+        "severity": "high",
+        "reachability": "transitive via MCP SDK",
+        "usedByThisPackageEntrypoint": false,
+        "action": "accepted residual until SDK upgrade; no audit fix --force"
+      },
+      {
+        "name": "express / express-rate-limit / path-to-regexp / body-parser / qs / ip-address",
+        "severity": "high/moderate/low",
+        "reachability": "transitive via MCP SDK HTTP stack",
+        "usedByThisPackageEntrypoint": false,
+        "action": "accepted residual; stdio bridge does not start Express"
+      },
+      {
+        "name": "ajv / fast-uri",
+        "severity": "moderate/high",
+        "reachability": "transitive JSON schema stack",
+        "usedByThisPackageEntrypoint": false,
+        "action": "accepted residual"
+      },
+      {
+        "name": "vitest / vite / rollup / esbuild / picomatch / postcss / nanoid",
+        "severity": "critical–low",
+        "reachability": "devDependencies",
+        "usedByThisPackageEntrypoint": false,
+        "action": "not shipped; Vitest UI server is not started by npm test"
+      }
+    ],
+    "conclusion": "16 advisories are real npm audit findings. They are not dismissed as hygiene. This package's stdio entrypoint does not load Hono serveStatic or Express. Residual risk is waiting on @modelcontextprotocol/sdk (and a retest) rather than a force-upgrade of this lockfile."
+  },
+  "fup": {
+    "FUP-001": { "status": "passed", "layers": ["A", "B"] },
+    "FUP-002": { "status": "passed", "layers": ["A"], "notes": "serializer unit coverage; not a separate MCP stdio case" },
+    "FUP-003": { "status": "passed", "layers": ["A", "B"] },
+    "FUP-004": { "status": "passed", "layers": ["A"] },
+    "FUP-005": { "status": "passed", "layers": ["A"] },
+    "FUP-006": { "status": "passed", "layers": ["A"] },
+    "FUP-007": { "status": "passed", "layers": ["A"] },
+    "FUP-008": { "status": "passed", "layers": ["A"] },
+    "FUP-009": { "status": "passed", "layers": ["A"], "notes": "helpers typed-outcome tests" },
+    "FUP-010": { "status": "passed", "layers": ["A"] },
+    "FUP-011": { "status": "passed", "layers": ["A"] },
+    "FUP-012": { "status": "passed", "layers": ["A"] },
+    "FUP-013": { "status": "passed", "layers": ["A", "B"] },
+    "FUP-014": { "status": "passed", "layers": ["A"] },
+    "FUP-015": { "status": "passed", "layers": ["A"] },
+    "FUP-016": { "status": "passed", "layers": ["B"] },
+    "FUP-017": { "status": "passed", "layers": ["A"] },
+    "FUP-018": { "status": "passed", "layers": ["A"] },
+    "FUP-019": { "status": "passed", "layers": ["A"], "notes": "task-manager/session identity; not tagged-server C" },
+    "FUP-020": { "status": "passed", "layers": ["A"] },
+    "FUP-021": { "status": "passed", "layers": ["A"] },
+    "FUP-022": { "status": "passed", "layers": ["A"], "notes": "symlink/canonical identity unit tests; Unicode/space not run on tagged server" },
+    "FUP-023": { "status": "passed", "layers": ["A"] },
+    "FUP-024": { "status": "passed", "layers": ["A"] },
+    "FUP-025": { "status": "implemented", "layers": ["A"], "notes": "Reducer/source handles attributable session.error; no dedicated submitAsync+SSE-before-204 integration test. Not tagged-server C." },
+    "FUP-026": { "status": "implemented", "layers": ["A"], "notes": "Typed assistant failure classification exists; wake-on-event wait is source-level. Not tagged-server C." },
+    "FUP-027": { "status": "passed", "layers": ["A"] },
+    "FUP-028": { "status": "passed", "layers": ["A"] },
+    "FUP-029": { "status": "passed", "layers": ["A"] },
+    "FUP-030": { "status": "passed", "layers": ["A"] },
+    "FUP-031": { "status": "passed", "layers": ["A"] },
+    "FUP-032": { "status": "implemented", "layers": ["A"], "notes": "Event-monitor keeps observationGap across reconnect; job-level between-poll gap is source-level." },
+    "FUP-033": { "status": "passed", "layers": ["A"] },
+    "FUP-034": { "status": "passed", "layers": ["A"], "notes": "classifier unit coverage; not tagged-server C" },
+    "FUP-035": { "status": "passed", "layers": ["A"] },
+    "FUP-036": { "status": "passed", "layers": ["A"] },
+    "FUP-037": { "status": "passed", "layers": ["A", "B"], "notes": "MCP stdio command-on-busy-session plus unit lease tests" },
+    "FUP-038": { "status": "passed", "layers": ["A"] },
+    "FUP-039": { "status": "passed", "layers": ["A"] },
+    "FUP-040": { "status": "passed", "layers": ["A"] },
+    "FUP-041": { "status": "implemented", "layers": ["A"], "notes": "Deadlines exist on submit/wait/check/ensureServer; not proven as one budget covering reconnect plus optional enrichment." },
+    "FUP-042": { "status": "passed", "layers": ["B"] },
+    "FUP-043": { "status": "passed", "layers": ["A"], "notes": "task-manager clock preserved; event-monitor clock injectable; readiness timeout uses real setTimeout" },
+    "FUP-044": { "status": "not_run", "layers": ["C"], "notes": "owned-child vs external serve lifetime not exercised against 1.18.29" },
+    "FUP-045": { "status": "passed", "layers": ["A"] },
+    "FUP-046": { "status": "passed", "layers": ["A"] },
+    "FUP-047": { "status": "passed", "layers": ["A"] },
+    "FUP-048": { "status": "passed", "layers": ["A"] },
+    "FUP-049": { "status": "passed", "layers": ["A"], "notes": "concurrent createOpencodeServer serialization unit test; not tagged-server C" },
+    "FUP-050": { "status": "passed", "layers": ["A"] },
+    "FUP-051": { "status": "implemented", "layers": ["A"], "notes": "ensureServer accepts signal/deadlineAt; no dedicated cancelled-reconnect spawn test beyond existing 401/timeout no-spawn cases." },
+    "FUP-052": { "status": "passed", "layers": ["A"] },
+    "FUP-053": { "status": "passed", "layers": ["B"] },
+    "FUP-054": { "status": "passed", "layers": ["B"] },
+    "FUP-055": { "status": "blocked_environment", "layers": ["C"], "notes": "Opt-in without binary fails. No 1.18.29 binary present to pass." },
+    "FUP-056": { "status": "not_run", "layers": ["C"], "notes": "Localhost provider fixture / delayed async / two-step tool turn not implemented. Do not treat session_create smoke as this gate." },
+    "FUP-057": { "status": "passed", "layers": ["A"], "notes": "permission/question unit tests; not MCP-stdio or tagged-server C" },
+    "FUP-058": { "status": "blocked_environment", "layers": ["C"], "notes": "Isolated-serve harness exists; not executed without 1.18.29." },
+    "FUP-059": { "status": "passed", "layers": ["A"] },
+    "FUP-060": { "status": "not_run", "layers": ["D"] },
+    "FUP-061": { "status": "passed", "layers": ["A", "D"], "notes": "Skip without opt-in (exit 0) and missing-config opt-in (exit 1) verified. Unavailable selected model not live-tested." },
+    "FUP-062": { "status": "passed", "layers": ["A"], "notes": "validator/live-script retain scratch on uncertain work; live failure-cleanup not exercised against a real model" },
+    "FUP-063": { "status": "passed", "layers": ["package"], "notes": "npm pack --dry-run includes docs/compatibility.md, README, LICENSE" },
+    "FUP-064": { "status": "passed", "layers": ["package"], "notes": "See audit section; 16 findings recorded, not dismissed" }
+  }
+}

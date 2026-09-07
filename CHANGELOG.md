@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Follow-up repairs on the 1.12.0 OpenCode ~1.18 bridge. Historical 1.12.0 notes
+below are unchanged; they describe the earlier commit, not these fixes.
+
+### Fixed
+
+- Command requests always send `arguments` (empty string when omitted).
+- Init/summarize reject unsupported `variant` before mutation; model policy
+  covers every inference path, including allowlist-without-pair and provider-test
+  discovered defaults.
+- Typed assistant/`error.data.message` outcomes replace keyword auth guesses.
+- MCP task JSON includes terminal/model/content fields; accepted-but-failed fire
+  is an error and is not summarized as autonomous success.
+- Session directory is adopted from OpenCode metadata; relative `normalizeDirectory`
+  leftovers on context/status are gone.
+- Event readiness requires `server.connected`; reconnects do not clear an
+  in-flight observation gap; early SSE failures can fail an accepted job.
+- Sync and async turns share a session lease; MCP cancellation is forwarded.
+- Connection-refused auto-start is narrow (not generic `fetch failed`);
+  post-start requires a healthy probe. Final HTTP 401 still does not spawn.
+- Real MCP stdio tests against a strict fake; live smoke goes through MCP
+  `fire` → `wait` and fails on missing opt-in configuration.
+
+### Changed
+
+- HTTP-client wire tests live in `tests/integration/http-transport-wire.test.ts`.
+  `npm run test:wire` also launches `node dist/index.js` over MCP stdio.
+- `docs/compatibility.md` ships in the npm tarball. `verification-summary.json`
+  records gate evidence for a checkout; Layer C/D remain opt-in and are not
+  claimed from a skip.
+
 ## [1.12.0] - 2026-09-06
 
 Repair for OpenCode ~1.18 session / `prompt_async` / status / questions. The

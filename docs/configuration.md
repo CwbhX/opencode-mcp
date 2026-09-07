@@ -15,8 +15,9 @@ server URL/auth, or you want a default / allowlisted model pair.
 | `OPENCODE_DEFAULT_MODEL` | Default model ID when not specified per-tool | *(none)* | No (must pair with provider) |
 | `OPENCODE_REQUIRE_EXPLICIT_MODEL` | When `true`, require an explicit or configured full provider/model pair | *(unset)* | No |
 | `OPENCODE_ALLOWED_MODELS` | JSON array of allowed `provider/model` strings | *(unset)* | No |
-| `OPENCODE_MCP_LIVE_TEST` | Set to `1` to run `npm run test:live` | *(unset)* | Test only |
-| `OPENCODE_MCP_SERVER_TEST` | Set to `1` to enable Layer C server tests | *(unset)* | Test only |
+| `OPENCODE_MCP_LIVE_TEST` | Set to `1` to run `npm run test:live`. Opt-in with missing URL/model config fails. | *(unset)* | Test only |
+| `OPENCODE_MCP_SERVER_TEST` | Set to `1` to enable Layer C tagged-server tests | *(unset)* | Test only |
+| `OPENCODE_MCP_SERVER_BINARY` | Absolute path to the OpenCode executable for Layer C (must report `1.18.29`) | *(unset)* | Test only |
 
 ### Notes
 

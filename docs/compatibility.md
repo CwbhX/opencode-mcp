@@ -13,9 +13,9 @@ actually been verified.
 |---|---|
 | Source-confirmed | Bridge code matches the inspected OpenCode ~1.18 session/prompt/status/question contract. |
 | Layer A | Unit/contract tests against repository modules (serializers, status reducer, task manager, transport). |
-| Layer B | HTTP wire tests against a strict local fake (`tests/integration/mcp-wire.test.ts`). Not a real OpenCode process. |
-| Layer C | Real tagged OpenCode process. Opt-in: `OPENCODE_MCP_SERVER_TEST=1`. Stubbed; not implemented in this release. |
-| Layer D | Live model smoke. Opt-in: `OPENCODE_MCP_LIVE_TEST=1`. Not run by default. |
+| Layer B | HTTP-client tests in `tests/integration/http-transport-wire.test.ts` **plus** MCP stdio tests in `tests/integration/mcp-stdio.test.ts` against a strict local fake. Not a real OpenCode process. |
+| Layer C | Real tagged OpenCode **v1.18.29** process. Opt-in: `OPENCODE_MCP_SERVER_TEST=1` and `OPENCODE_MCP_SERVER_BINARY=/absolute/path`. Missing opt-in is a skip, not a pass. Opt-in with a missing/wrong binary fails. |
+| Layer D | Live model smoke through MCP `opencode_fire` → `opencode_wait`. Opt-in: `OPENCODE_MCP_LIVE_TEST=1`. Explicit opt-in with missing configuration fails. |
 | Not exercised | No automated pass in this checkout for that row. A skip is not a pass. |
 
 **Comparison target:** OpenCode stable **v1.18.29** (source + implementation brief). Running `/global/health` and `/doc` can differ from `opencode --version` if another process is bound to the port.
@@ -109,7 +109,7 @@ question + 67 other), plus **10 resources** and **6 prompts**.
 | `opencode_session_children` | `GET /session/{id}/children` | Child sessions | Session exists | — | ~1.18.29 source | |
 | `opencode_session_status` | `GET /session/status` | Status map | OpenCode | JOB-08 (A) | ~1.18.29 source | Missing key ≠ success |
 | `opencode_session_todo` | `GET /session/{id}/todo` | Todo list | Session exists | — | ~1.18.29 source | |
-| `opencode_session_init` | `POST /session/{id}/init` | `{ messageID, providerID, modelID, variant? }` | Session + model | — | ~1.18.29 source | Slow; variant forwarded if provided |
+| `opencode_session_init` | `POST /session/{id}/init` | `{ messageID, providerID, modelID }` only; explicit `variant` is rejected locally | Session + model | FUP-003 (A/B) | ~1.18.29 source + Layer B | No `variant` field sent |
 | `opencode_session_abort` | `POST /session/{id}/abort` | Session-wide abort (not job-specific) | Session exists | — | ~1.18.29 source | Does not claim a specific job was aborted |
 | `opencode_session_fork` | `POST /session/{id}/fork` | Optional `messageID` | Session exists | — | ~1.18.29 source | |
 | `opencode_session_share` | `POST /session/{id}/share` | Public share | Session exists | — | ~1.18.29 source | **Not exercised** against a user server |
@@ -184,10 +184,35 @@ question + 67 other), plus **10 resources** and **6 prompts**.
 
 | Layer | How to run | Status |
 |---|---|---|
-| A — unit/contract | `npm run test:unit` | Implemented (serializers, transport, task manager, status, directory, startup probe) |
-| B — HTTP wire | `npm run test:wire` | Implemented against a local fake via `OpenCodeClient` (not a spawned MCP stdio process) |
-| C — real OpenCode | `OPENCODE_MCP_SERVER_TEST=1 npm run test:server` | Stub; skips unless opt-in |
-| D — live model | `OPENCODE_MCP_LIVE_TEST=1 npm run test:live` | Script skips unless opt-in + full provider/model pair; uses a scratch directory |
+| A — unit/contract | `npm run test:unit` | Implemented (serializers, transport, task manager, status, directory, startup probe, live-result validator) |
+| B — HTTP + MCP stdio | `npm run test:wire` | HTTP-client fake **and** spawned `node dist/index.js` over MCP stdio against a strict fake OpenCode |
+| C — tagged OpenCode v1.18.29 | `OPENCODE_MCP_SERVER_BINARY=… OPENCODE_MCP_SERVER_TEST=1 npm run test:server` | Harness implemented for binary identity (FUP-055) and isolated serve + MCP `session_create`. Skip without opt-in. Opt-in + missing/wrong binary fails. FUP-056 (local provider fixture / fire / two-step tool turn) is **not** implemented. |
+| D — live model | `OPENCODE_MCP_LIVE_TEST=1 OPENCODE_AUTO_SERVE=false … npm run test:live` | MCP `fire` → `wait`. Skip without opt-in. Opt-in + missing config fails. |
 
-G1/G2 (A+B) can pass without proving the user's Mac, account, or Zen model.
+G1/G2 (A+B) can pass without proving the user's Mac, account, or selected cloud model.
 A skipped Layer C/D test is not a compatibility certification.
+
+Machine-readable command evidence for a specific checkout lives in
+`verification-summary.json`. That file records dirty-tree fingerprints and
+gate statuses; it is not a live-model certificate.
+
+## Dependency audit (recorded, not dismissed)
+
+`npm audit` on 2026-09-07 (Node v25.1.0, npm 11.6.2, lockfile as resolved
+below) reported **16** advisories total and **9** with `--omit=dev`.
+
+Production path is `@modelcontextprotocol/sdk@1.26.0` (stdio MCP). This
+package's entrypoint does not start Hono `serveStatic` or Express. Residual
+risk is transitive:
+
+| Advisory area | Severity | Reachability | Mitigation / residual |
+|---|---|---|---|
+| `hono`, `@hono/node-server` | high | Transitive via MCP SDK | Not used by this stdio bridge. No independent bump without an SDK upgrade. |
+| `express`, `express-rate-limit`, `path-to-regexp`, `body-parser`, `qs`, `ip-address` | high/moderate/low | Transitive via MCP SDK HTTP/SSE stack | Same: unused by `node dist/index.js` stdio. |
+| `ajv`, `fast-uri` | moderate/high | Transitive JSON schema stack | Same. |
+| `vitest`, `vite`, `rollup`, `esbuild`, `picomatch`, `postcss`, `nanoid` | critical–low | Dev-only (`npm audit --omit=dev` drops them) | Not shipped. Vitest UI server is not started by `npm test`. |
+
+No `npm audit fix --force` was applied. Accepted residual: wait for
+`@modelcontextprotocol/sdk` to pick up patched transitives, or pin after a
+compatibility retest. Do not treat “16 vulnerabilities” as harmless hygiene
+or as proof the MCP process is remotely exploitable.
