@@ -345,13 +345,13 @@ describe("waitUntilReady", () => {
     await expect(ready).resolves.toBeUndefined();
   });
 
-  it("resolves when the first application event arrives if server.connected is absent", async () => {
+  it("FUP-030: an ordinary typed event before server.connected does not satisfy readiness", async () => {
     const hub = createSseHub();
     const monitor = acquireEventMonitor(hub.client(), KEY);
-    const ready = monitor.waitUntilReady(performance.now() + 2000);
+    const ready = monitor.waitUntilReady(performance.now() + 250);
     await waitFor("SSE start", () => hub.calls.length === 1);
     hub.push(sse("session.error", { sessionID: "ses_job" }));
-    await expect(ready).resolves.toBeUndefined();
+    await expect(ready).rejects.toThrow(/observation_failed/i);
   });
 
   it("times out when deadline already passed", async () => {
@@ -431,6 +431,9 @@ describe("observationGap", () => {
     expect(monitor.observationGap).toBe(true);
 
     hub.push(sse("server.connected"));
-    await waitFor("gap cleared", () => monitor.observationGap === false);
+    await waitFor("second connected event", () => {
+      return received.filter((type) => type === "server.connected").length >= 2;
+    });
+    expect(monitor.observationGap).toBe(true);
   });
 });

@@ -1,3 +1,4 @@
+import type { Clock } from "./bridge-types.js";
 import type { OpenCodeClient } from "./client.js";
 import { defaultClock } from "./request-context.js";
 
@@ -5,6 +6,8 @@ export interface AppEvent {
   type: string;
   properties?: Record<string, unknown>;
   raw?: unknown;
+  localSeq: number;
+  connectionGeneration: number;
 }
 
 export interface EventMonitorKey {
@@ -15,10 +18,16 @@ export interface EventMonitorKey {
 export interface EventMonitor {
   readonly key: EventMonitorKey;
   readonly observationGap: boolean;
+  readonly currentSeq: number;
+  readonly gapGeneration: number;
   waitUntilReady(deadlineAt: number, signal?: AbortSignal): Promise<void>;
   /** Subscribe; return unsubscribe. Filter by sessionId/messageId when those fields are present on the event. */
   on(filter: { sessionId?: string; messageId?: string }, listener: (event: AppEvent) => void): () => void;
   close(): void;
+}
+
+export interface EventMonitorOptions {
+  clock?: Clock;
 }
 
 type EventMonitorClient = {
@@ -32,7 +41,6 @@ type ReadyWaiter = { resolve: () => void; reject: (error: Error) => void };
 
 const MAX_RECENT_EVENTS = 100;
 const MAX_RECONNECT_ATTEMPTS = 3;
-const clock = defaultClock();
 
 const monitors = new Map<string, SharedEventMonitor>();
 
@@ -153,23 +161,36 @@ function backoffMs(attempt: number): number {
 class SharedEventMonitor implements EventMonitor {
   readonly key: EventMonitorKey;
   private readonly client: EventMonitorClient;
+  private readonly clock: Clock;
   private readonly listeners = new Set<ListenerEntry>();
   private readonly readyWaiters = new Set<ReadyWaiter>();
   private readonly recent: AppEvent[] = [];
   private _observationGap = false;
+  private _gapGeneration = 0;
+  private _currentSeq = 0;
+  private connectionGeneration = 0;
   private ready = false;
   private closed = false;
   private waiterCount = 0;
   private running = false;
   private abort?: AbortController;
 
-  constructor(client: EventMonitorClient, key: EventMonitorKey) {
+  constructor(client: EventMonitorClient, key: EventMonitorKey, clock: Clock) {
     this.client = client;
     this.key = key;
+    this.clock = clock;
   }
 
   get observationGap(): boolean {
     return this._observationGap;
+  }
+
+  get currentSeq(): number {
+    return this._currentSeq;
+  }
+
+  get gapGeneration(): number {
+    return this._gapGeneration;
   }
 
   async waitUntilReady(deadlineAt: number, signal?: AbortSignal): Promise<void> {
@@ -182,7 +203,7 @@ class SharedEventMonitor implements EventMonitor {
     if (this.ready) {
       return;
     }
-    if (clock.monotonic() >= deadlineAt) {
+    if (this.clock.monotonic() >= deadlineAt) {
       throw observationFailed("deadline elapsed");
     }
 
@@ -269,12 +290,12 @@ class SharedEventMonitor implements EventMonitor {
         if (this.closed || this.abort?.signal.aborted || !this.isActive()) {
           return;
         }
-        this._observationGap = true;
+        this.markDisconnected();
       } catch {
         if (this.closed || this.abort?.signal.aborted || !this.isActive()) {
           return;
         }
-        this._observationGap = true;
+        this.markDisconnected();
       }
 
       failures += 1;
@@ -282,7 +303,7 @@ class SharedEventMonitor implements EventMonitor {
         return;
       }
       try {
-        await clock.sleep(backoffMs(failures), this.abort?.signal);
+        await this.clock.sleep(backoffMs(failures), this.abort?.signal);
       } catch {
         return;
       }
@@ -304,26 +325,38 @@ class SharedEventMonitor implements EventMonitor {
       type,
       ...(properties ? { properties } : {}),
       raw: parsed,
+      localSeq: 0,
+      connectionGeneration: this.connectionGeneration,
     });
   }
 
+  private markDisconnected(): void {
+    this.ready = false;
+    this._observationGap = true;
+    this._gapGeneration += 1;
+    this.connectionGeneration += 1;
+  }
+
   private dispatch(event: AppEvent): void {
-    this.recent.push(event);
+    this._currentSeq += 1;
+    const stamped: AppEvent = {
+      ...event,
+      localSeq: this._currentSeq,
+      connectionGeneration: this.connectionGeneration,
+    };
+    this.recent.push(stamped);
     if (this.recent.length > MAX_RECENT_EVENTS) {
       this.recent.shift();
     }
 
     if (event.type === "server.connected") {
-      this._observationGap = false;
-    }
-    if (!this.ready) {
       this.ready = true;
       this.resolveReady();
     }
 
     for (const entry of this.listeners) {
-      if (matches(entry.filter, event)) {
-        notifyListener(entry.listener, event);
+      if (matches(entry.filter, stamped)) {
+        notifyListener(entry.listener, stamped);
       }
     }
   }
@@ -348,7 +381,7 @@ class SharedEventMonitor implements EventMonitor {
       };
 
       const onAbort = () => waiter.reject(observationFailed("aborted"));
-      const remaining = Math.max(0, deadlineAt - clock.monotonic());
+      const remaining = Math.max(0, deadlineAt - this.clock.monotonic());
       const timer = setTimeout(() => {
         waiter.reject(observationFailed("deadline elapsed"));
       }, remaining);
@@ -382,12 +415,17 @@ class SharedEventMonitor implements EventMonitor {
 export function acquireEventMonitor(
   client: EventMonitorClient,
   key: EventMonitorKey,
+  options?: EventMonitorOptions,
 ): EventMonitor {
   const normalized = normalizeKey(key);
   const id = cacheKey(normalized);
   const existing = monitors.get(id);
   if (existing) return existing;
-  const created = new SharedEventMonitor(client, normalized);
+  const created = new SharedEventMonitor(
+    client,
+    normalized,
+    options?.clock ?? defaultClock(),
+  );
   monitors.set(id, created);
   return created;
 }

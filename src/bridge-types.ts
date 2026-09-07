@@ -52,6 +52,10 @@ export interface TaskRecord {
   state: TaskState;
   observedAssistantMessageIDs: string[];
   observationGap: boolean;
+  observationBaselineSeq?: number;
+  gapGenerationAtStart?: number;
+  dedicatedNewSession?: boolean;
+  stickyError?: string | null;
 }
 
 export interface PendingRequestInfo {
@@ -169,6 +173,11 @@ export interface TaskObservations {
   observationGap: boolean;
   sessionMissing?: boolean;
   noReply?: boolean;
+  eventBaselineSeq?: number;
+  dedicatedNewSession?: boolean;
+  permissionsObservationError?: string;
+  questionsObservationError?: string;
+  statusObservationError?: string;
 }
 
 export interface Clock {

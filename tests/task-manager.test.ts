@@ -104,9 +104,11 @@ interface HarnessState {
   promptAsync?: () => Promise<unknown>;
 }
 
+const HARNESS_DIR = tmpdir();
+
 function createHarness(initial?: Partial<HarnessState>) {
   const state: HarnessState = {
-    sessions: new Map([[SESSION, { id: SESSION }]]),
+    sessions: new Map([[SESSION, { id: SESSION, directory: HARNESS_DIR }]]),
     messages: new Map(),
     status: {},
     permissions: [],
@@ -128,7 +130,7 @@ function createHarness(initial?: Partial<HarnessState>) {
       if (sessionMatch) {
         const id = sessionMatch[1]!;
         if (state.missingSessions.has(id)) throw notFound(pathName);
-        return state.sessions.get(id) ?? { id };
+        return state.sessions.get(id) ?? { id, directory: HARNESS_DIR };
       }
       throw notFound(pathName);
     },
@@ -138,8 +140,8 @@ function createHarness(initial?: Partial<HarnessState>) {
     async (pathName: string, _body?: unknown): Promise<unknown> => {
       if (pathName === "/session") {
         const id = "ses_created_by_bridge";
-        state.sessions.set(id, { id });
-        return { id };
+        state.sessions.set(id, { id, directory: HARNESS_DIR });
+        return { id, directory: HARNESS_DIR };
       }
       if (/^\/session\/[^/]+\/prompt_async$/.test(pathName)) {
         if (state.promptAsync) return state.promptAsync();

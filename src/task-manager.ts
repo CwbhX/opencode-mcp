@@ -17,12 +17,12 @@ import {
 } from "./event-monitor.js";
 import {
   buildPromptBody,
-  parseAllowedModels,
-  resolveModelSelection,
+  resolveConfiguredModel,
 } from "./model-selection.js";
 import { createAscendingId, createBridgeJobId, isValidMessageId } from "./opencode-id.js";
 import {
   assertSessionDirectory,
+  canonicalDirectoryIdentity,
   defaultClock,
   directoriesMatch,
   isUnsupportedLiteralPercentPath,
@@ -81,8 +81,16 @@ export interface TaskManager {
     selector: TaskSelector,
     opts: { deadlineAt: number; signal?: AbortSignal; pollIntervalMs?: number },
   ): Promise<TaskResult>;
-  check(selector: TaskSelector): Promise<TaskResult>;
+  check(
+    selector: TaskSelector,
+    opts?: { deadlineAt?: number; signal?: AbortSignal },
+  ): Promise<TaskResult>;
   getRecord(jobId: string): TaskRecord | undefined;
+  assertSessionTurnAvailable(sessionId: string, directory?: string): void;
+  withSessionTurn<T>(
+    params: { sessionId: string; directory?: string },
+    fn: () => Promise<T>,
+  ): Promise<T>;
   /** Test/reset helper */
   reset(): void;
 }
@@ -99,6 +107,9 @@ interface JobRuntime {
   events: unknown[];
   unsubscribe?: () => void;
   monitor?: EventMonitor;
+  wakeup?: () => void;
+  stickyClassified?: ClassifiedTask;
+  stickyObservations?: TaskObservations;
 }
 
 type ResolvedSelector =
@@ -133,14 +144,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function asList(value: unknown): unknown[] {
-  if (Array.isArray(value)) return value;
-  if (!isRecord(value)) return [];
+function asListOrFail(
+  value: unknown,
+  label: string,
+): { items: unknown[]; error?: string } {
+  if (value === null || value === undefined) return { items: [] };
+  if (Array.isArray(value)) return { items: value };
+  if (!isRecord(value)) {
+    return { items: [], error: `Malformed ${label} payload.` };
+  }
   for (const key of ["data", "messages", "permissions", "questions", "items"]) {
     const entry = value[key];
-    if (Array.isArray(entry)) return entry;
+    if (Array.isArray(entry)) return { items: entry };
   }
-  return [];
+  if (Object.keys(value).length === 0) return { items: [] };
+  return { items: [], error: `Malformed ${label} payload.` };
 }
 
 function messageInfo(message: unknown): Record<string, unknown> | null {
@@ -268,25 +286,21 @@ function rejectPercentPath(directory: string): never {
 }
 
 function resolveModel(input: SubmitPromptInput): ModelSelection | undefined {
-  return resolveModelSelection({
+  return resolveConfiguredModel({
     providerID: input.providerID,
     modelID: input.modelID,
-    defaults: {
-      providerID: process.env.OPENCODE_DEFAULT_PROVIDER,
-      modelID: process.env.OPENCODE_DEFAULT_MODEL,
-    },
-    requireExplicit: process.env.OPENCODE_REQUIRE_EXPLICIT_MODEL === "true",
-    allowedModels: parseAllowedModels(process.env.OPENCODE_ALLOWED_MODELS),
   });
 }
 
 function shouldReleaseGate(classified: ClassifiedTask, sessionMissing?: boolean): boolean {
-  return (
-    sessionMissing === true ||
-    classified.state === "succeeded" ||
-    classified.state === "failed" ||
-    classified.state === "aborted"
-  );
+  if (sessionMissing === true) return true;
+  if (
+    classified.state === "blocked_permission" ||
+    classified.state === "blocked_question"
+  ) {
+    return false;
+  }
+  return classified.terminal === true && classified.mayStillBeRunning === false;
 }
 
 export function createTaskManager(deps: TaskManagerDeps): TaskManager {
@@ -301,7 +315,14 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
   }
 
   function gateKey(sessionId: string, directory?: string): string {
-    return `${serverBaseUrl()}\0${directory ?? ""}\0${sessionId}`;
+    return `${serverBaseUrl()}\0${canonicalDirectoryIdentity(directory)}\0${sessionId}`;
+  }
+
+  function heldByOther(sessionId: string, directory?: string, jobId?: string): string | undefined {
+    const key = gateKey(sessionId, directory);
+    const holder = gates.get(key);
+    if (holder && holder !== jobId) return holder;
+    return undefined;
   }
 
   function acquireGate(record: TaskRecord): void {
@@ -315,6 +336,40 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
       );
     }
     gates.set(key, record.jobId);
+  }
+
+  function assertSessionTurnAvailable(sessionId: string, directory?: string): void {
+    const holder = heldByOther(sessionId, directory);
+    if (holder) {
+      throw new SessionBusyError(
+        `SESSION_BUSY: session ${sessionId} already has an active tracked turn (${holder}). Mixed sync/async mutations are rejected.`,
+        sessionId,
+      );
+    }
+  }
+
+  async function withSessionTurn<T>(
+    params: { sessionId: string; directory?: string },
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    assertSessionTurnAvailable(params.sessionId, params.directory);
+    const lease: TaskRecord = {
+      jobId: `lease_${createBridgeJobId()}`,
+      serverBaseUrl: serverBaseUrl(),
+      sessionId: params.sessionId,
+      createdAt: clock.now(),
+      submissionState: "accepted",
+      state: "running",
+      observedAssistantMessageIDs: [],
+      observationGap: false,
+    };
+    if (params.directory) lease.directory = params.directory;
+    acquireGate(lease);
+    try {
+      return await fn();
+    } finally {
+      releaseGate(lease);
+    }
   }
 
   function releaseGate(record: TaskRecord): void {
@@ -374,16 +429,31 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
     record: TaskRecord,
     observations: TaskObservations,
     classified: ClassifiedTask,
-  ): void {
+  ): ClassifiedTask {
     record.observationGap = observations.observationGap;
     rememberAssistants(record, observations);
-    record.state = classified.state;
-    if (shouldReleaseGate(classified, observations.sessionMissing)) {
-      releaseGate(record);
-      const runtime = runtimes.get(record.jobId);
-      runtime?.unsubscribe?.();
-      runtime && (runtime.unsubscribe = undefined);
+    if (record.submissionState === "unknown" && observations.userMessage) {
+      record.submissionState = "accepted";
     }
+    const runtime = runtimeOf(record.jobId);
+    let next = classified;
+    if (
+      runtime.stickyClassified?.terminal === true &&
+      classified.terminal !== true &&
+      (classified.state === "queued" || classified.state === "running")
+    ) {
+      next = runtime.stickyClassified;
+    } else if (classified.terminal === true) {
+      runtime.stickyClassified = classified;
+      runtime.stickyObservations = observations;
+    }
+    record.state = next.state;
+    if (shouldReleaseGate(next, observations.sessionMissing)) {
+      releaseGate(record);
+      runtime.unsubscribe?.();
+      runtime.unsubscribe = undefined;
+    }
+    return next;
   }
 
   function toResult(record: TaskRecord | undefined, extras: ResultExtras = {}): TaskResult {
@@ -550,12 +620,17 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
     pathName: string,
     directory: string | undefined,
     opts?: { deadlineAt?: number; signal?: AbortSignal },
-  ): Promise<unknown[]> {
+    label = "list",
+  ): Promise<{ items: unknown[]; error?: string }> {
     try {
-      return asList(await client.get(pathName, undefined, directory, opts));
+      const raw = await client.get(pathName, undefined, directory, opts);
+      return asListOrFail(raw, label);
     } catch (error) {
-      if (isNotFound(error)) return [];
-      throw error;
+      if (isNotFound(error)) return { items: [] };
+      return {
+        items: [],
+        error: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 
@@ -568,6 +643,8 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
     observationGap?: boolean;
     deadlineAt?: number;
     signal?: AbortSignal;
+    eventBaselineSeq?: number;
+    dedicatedNewSession?: boolean;
   }): Promise<TaskObservations> {
     const opts = { deadlineAt: params.deadlineAt, signal: params.signal };
     let rawStatus: unknown;
@@ -575,13 +652,20 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
     let sessionMissing = false;
     let pendingPermissions: unknown[] = [];
     let pendingQuestions: unknown[] = [];
+    let permissionsObservationError: string | undefined;
+    let questionsObservationError: string | undefined;
+    let statusObservationError: string | undefined;
 
     if (params.sessionId) {
       try {
         rawStatus = await client.get("/session/status", undefined, params.directory, opts);
       } catch (error) {
-        if (!isNotFound(error)) throw error;
-        rawStatus = {};
+        if (!isNotFound(error)) {
+          statusObservationError =
+            error instanceof Error ? error.message : String(error);
+        } else {
+          rawStatus = {};
+        }
       }
 
       try {
@@ -591,14 +675,32 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
           params.directory,
           opts,
         );
-        messages = asList(page);
+        const parsed = asListOrFail(page, "messages");
+        messages = parsed.items;
+        if (parsed.error) {
+          statusObservationError = parsed.error;
+        }
       } catch (error) {
         if (isNotFound(error)) sessionMissing = true;
         else throw error;
       }
 
-      pendingPermissions = await readOptionalList("/permission", params.directory, opts);
-      pendingQuestions = await readOptionalList("/question", params.directory, opts);
+      const permissions = await readOptionalList(
+        "/permission",
+        params.directory,
+        opts,
+        "permissions",
+      );
+      pendingPermissions = permissions.items;
+      permissionsObservationError = permissions.error;
+      const questions = await readOptionalList(
+        "/question",
+        params.directory,
+        opts,
+        "questions",
+      );
+      pendingQuestions = questions.items;
+      questionsObservationError = questions.error;
     }
 
     return {
@@ -611,16 +713,29 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
       rawStatus,
       pendingPermissions,
       pendingQuestions,
-      events: params.events ?? [],
+      events: [...(params.events ?? [])],
       observationGap: params.observationGap ?? false,
       sessionMissing,
+      eventBaselineSeq: params.eventBaselineSeq,
+      dedicatedNewSession: params.dedicatedNewSession,
+      permissionsObservationError,
+      questionsObservationError,
+      statusObservationError,
     };
   }
 
   function observationGapOf(record?: TaskRecord): boolean {
     if (!record) return false;
     const runtime = runtimes.get(record.jobId);
-    return record.observationGap || Boolean(runtime?.monitor?.observationGap);
+    const liveGap = Boolean(runtime?.monitor?.observationGap);
+    const generation = runtime?.monitor?.gapGeneration ?? 0;
+    if (
+      record.gapGenerationAtStart !== undefined &&
+      generation > record.gapGenerationAtStart
+    ) {
+      record.observationGap = true;
+    }
+    return record.observationGap || liveGap;
   }
 
   async function gather(
@@ -628,6 +743,11 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
     opts?: { deadlineAt?: number; signal?: AbortSignal },
   ): Promise<TaskObservations> {
     if (resolved.kind === "record") {
+      if (stripBaseUrl(client.getBaseUrl()) !== resolved.record.serverBaseUrl) {
+        throw new Error(
+          "JOB server identity changed; this tracked job is not moved to another OpenCode URL. Recover with the session/message/directory tuple if intended.",
+        );
+      }
       const runtime = runtimes.get(resolved.record.jobId);
       return observe({
         sessionId: resolved.record.sessionId,
@@ -638,15 +758,50 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
         observationGap: observationGapOf(resolved.record),
         deadlineAt: opts?.deadlineAt,
         signal: opts?.signal,
+        eventBaselineSeq: resolved.record.observationBaselineSeq,
+        dedicatedNewSession: resolved.record.dedicatedNewSession,
       });
     }
     const directory = resolved.directory
       ? validateDirectory(resolved.directory)
       : undefined;
+    let adopted = directory;
+    try {
+      const session = await client.get(
+        `/session/${resolved.sessionId}`,
+        undefined,
+        directory,
+        opts,
+      );
+      const returnedId = sessionIdOf(session);
+      if (!returnedId || returnedId !== resolved.sessionId) {
+        throw new Error("Recovery session identity did not match the requested session.");
+      }
+      const sessionDirectory = sessionDirectoryOf(session);
+      if (directory && sessionDirectory) {
+        assertSessionDirectory({
+          requestedDirectory: directory,
+          sessionDirectory,
+        });
+      } else if (!directory && sessionDirectory) {
+        adopted = validateDirectory(sessionDirectory);
+      }
+    } catch (error) {
+      if (isNotFound(error)) {
+        return observe({
+          sessionId: resolved.sessionId,
+          requestMessageID: resolved.requestMessageID,
+          directory: adopted,
+          deadlineAt: opts?.deadlineAt,
+          signal: opts?.signal,
+        }).then((observations) => ({ ...observations, sessionMissing: true }));
+      }
+      throw error;
+    }
     return observe({
       sessionId: resolved.sessionId,
       requestMessageID: resolved.requestMessageID,
-      directory,
+      directory: adopted,
       deadlineAt: opts?.deadlineAt,
       signal: opts?.signal,
     });
@@ -675,16 +830,26 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
     input: SubmitPromptInput,
   ): Promise<void> {
     const runtime = runtimeOf(record.jobId);
-    const monitor = acquireEventMonitor(client as unknown as EventClient, {
-      serverBaseUrl: record.serverBaseUrl,
-      directory: record.directory,
-    });
+    const monitor = acquireEventMonitor(
+      client as unknown as EventClient,
+      {
+        serverBaseUrl: record.serverBaseUrl,
+        directory: record.directory,
+      },
+      { clock },
+    );
     runtime.monitor = monitor;
     runtime.unsubscribe = monitor.on({ sessionId: record.sessionId }, (event) => {
       runtime.events.push(event);
+      if (runtime.events.length > 200) {
+        runtime.events.splice(0, runtime.events.length - 200);
+      }
+      runtime.wakeup?.();
     });
     await monitor.waitUntilReady(input.deadlineAt, input.signal);
-    record.observationGap = monitor.observationGap;
+    record.observationGap = false;
+    record.gapGenerationAtStart = monitor.gapGeneration;
+    record.observationBaselineSeq = monitor.currentSeq;
   }
 
   async function submitAsync(input: SubmitPromptInput): Promise<TaskResult> {
@@ -702,6 +867,16 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
       model,
       variant: input.variant,
     });
+    if (stripBaseUrl(client.getBaseUrl()) !== record.serverBaseUrl) {
+      record.state = "failed";
+      return toResult(record, {
+        error: "Client server URL changed before submission; the job was not sent.",
+        nextAction: "Reconcile the OpenCode server identity before retrying. Do not replay this prompt.",
+        safeToResubmit: true,
+        mayStillBeRunning: false,
+        terminal: true,
+      });
+    }
     const readOpts = { deadlineAt: input.deadlineAt, signal: input.signal };
 
     if (input.sessionId) {
@@ -712,11 +887,38 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
           directory,
           readOpts,
         );
-        record.sessionId = sessionIdOf(session) ?? input.sessionId;
-        assertSessionDirectory({
-          requestedDirectory: directory,
-          sessionDirectory: sessionDirectoryOf(session),
-        });
+        const returnedId = sessionIdOf(session);
+        if (!returnedId || returnedId !== input.sessionId) {
+          record.state = "failed";
+          return toResult(record, {
+            error: "Session identity check failed: returned id did not match the requested session.",
+            nextAction: "Do not treat this as the requested session; inspect the lookup result.",
+            safeToResubmit: false,
+            mayStillBeRunning: false,
+            terminal: true,
+          });
+        }
+        record.sessionId = returnedId;
+        const sessionDirectory = sessionDirectoryOf(session);
+        if (!sessionDirectory) {
+          record.state = "failed";
+          return toResult(record, {
+            error: "Session directory metadata is missing; identity cannot be verified.",
+            nextAction: "Failed identity check; do not monitor a different project by default.",
+            safeToResubmit: false,
+            mayStillBeRunning: false,
+            terminal: true,
+          });
+        }
+        const validatedSessionDir = validateDirectory(sessionDirectory);
+        if (directory) {
+          assertSessionDirectory({
+            requestedDirectory: directory,
+            sessionDirectory: validatedSessionDir,
+          });
+        } else if (validatedSessionDir) {
+          record.directory = validatedSessionDir;
+        }
       } catch (error) {
         if (isNotFound(error)) {
           record.sessionId = input.sessionId;
@@ -747,6 +949,12 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
         });
         const sessionId = sessionIdOf(created);
         if (sessionId) record.sessionId = sessionId;
+        const createdDirectory = sessionDirectoryOf(created);
+        if (createdDirectory) {
+          const adopted = validateDirectory(createdDirectory);
+          if (adopted) record.directory = adopted;
+        }
+        record.dedicatedNewSession = true;
       } catch (error) {
         if (error instanceof AmbiguousAcceptanceError) {
           record.submissionState = "unknown";
@@ -824,14 +1032,31 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
 
     try {
       await client.post(`/session/${record.sessionId}/prompt_async`, body, {
-        directory,
+        directory: record.directory,
         deadlineAt: input.deadlineAt,
         signal: input.signal,
         retryClass: "mutation",
       });
       record.submissionState = "accepted";
-      record.state = "queued";
-      return toResult(record);
+      const runtime = runtimeOf(record.jobId);
+      const observations = await observe({
+        sessionId: record.sessionId,
+        requestMessageID: record.requestMessageID,
+        directory: record.directory,
+        expectedModel: model,
+        events: [...runtime.events],
+        observationGap: observationGapOf(record),
+        deadlineAt: input.deadlineAt,
+        signal: input.signal,
+        eventBaselineSeq: record.observationBaselineSeq,
+        dedicatedNewSession: record.dedicatedNewSession,
+      });
+      const classified = applyClassification(
+        record,
+        observations,
+        classifyTask(observations),
+      );
+      return toResult(record, { classified, observations });
     } catch (error) {
       if (error instanceof AmbiguousAcceptanceError) {
         record.submissionState = "unknown";
@@ -905,9 +1130,9 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
           deadlineAt: opts.deadlineAt,
           signal: opts.signal,
         });
-        const classified = classifyTask(observations);
+        let classified = classifyTask(observations);
         if (resolved.kind === "record") {
-          applyClassification(resolved.record, observations, classified);
+          classified = applyClassification(resolved.record, observations, classified);
         }
         last = { observations, classified };
 
@@ -965,7 +1190,27 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
       }
 
       try {
-        await clock.sleep(Math.min(pollIntervalMs, remaining), opts.signal);
+        const remainingSleep = Math.min(pollIntervalMs, remaining);
+        if (resolved.kind === "record") {
+          const runtime = runtimeOf(resolved.record.jobId);
+          await new Promise<void>((resolveWait, rejectWait) => {
+            let settled = false;
+            const finish = (fn: () => void) => {
+              if (settled) return;
+              settled = true;
+              if (runtime.wakeup === onWake) runtime.wakeup = undefined;
+              fn();
+            };
+            const onWake = () => finish(resolveWait);
+            runtime.wakeup = onWake;
+            clock.sleep(remainingSleep, opts.signal).then(
+              () => finish(resolveWait),
+              (error) => finish(() => rejectWait(error)),
+            );
+          });
+        } else {
+          await clock.sleep(remainingSleep, opts.signal);
+        }
       } catch (error) {
         if (isAbortError(error) || opts.signal?.aborted) {
           return resultForResolved(resolved, {
@@ -993,17 +1238,24 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
     };
   }
 
-  async function check(selector: TaskSelector): Promise<TaskResult> {
+  async function check(
+    selector: TaskSelector,
+    opts?: { deadlineAt?: number; signal?: AbortSignal },
+  ): Promise<TaskResult> {
     const resolved = resolveSelector(selector);
     if (resolved.kind === "missing-job") return untrackedJob(resolved.jobId);
-    const observations = await gather(resolved);
-    const classified = classifyTask(
+    const deadlineAt = opts?.deadlineAt ?? clock.monotonic() + 15_000;
+    const observations = await gather(resolved, {
+      deadlineAt,
+      signal: opts?.signal,
+    });
+    let classified = classifyTask(
       resolved.kind === "anonymous" && resolved.tracking === "untracked"
         ? { ...observations, requestMessageID: undefined }
         : observations,
     );
     if (resolved.kind === "record") {
-      applyClassification(resolved.record, observations, classified);
+      classified = applyClassification(resolved.record, observations, classified);
     }
     return resultForResolved(resolved, { classified, observations });
   }
@@ -1021,7 +1273,15 @@ export function createTaskManager(deps: TaskManagerDeps): TaskManager {
     gates.clear();
   }
 
-  return { submitAsync, wait, check, getRecord, reset };
+  return {
+    submitAsync,
+    wait,
+    check,
+    getRecord,
+    assertSessionTurnAvailable,
+    withSessionTurn,
+    reset,
+  };
 }
 
 const sharedManagers = new WeakMap<object, TaskManager>();

@@ -79,6 +79,15 @@ export function validateDirectory(
   return resolved;
 }
 
+export function canonicalDirectoryIdentity(directory?: string): string {
+  if (!directory) return "";
+  try {
+    return realpathSync(directory);
+  } catch {
+    return resolve(directory);
+  }
+}
+
 export function directoriesMatch(a: string, b: string): boolean {
   if (pathKind(a) !== "missing" && pathKind(b) !== "missing") {
     try {
