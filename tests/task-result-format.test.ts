@@ -50,6 +50,10 @@ describe("taskResultJson", () => {
     });
     expect(json.waitOutcome).toBe("timed_out");
     expect(json.rawSessionState).toBe("busy");
+    expect(json).toHaveProperty("terminal");
+    expect(json).toHaveProperty("requestedModel");
+    expect(json).toHaveProperty("observedModel");
+    expect(json).toHaveProperty("content");
   });
 });
 
@@ -69,6 +73,20 @@ describe("tool isError policy", () => {
     expect(
       fireToolIsError(result({ submissionState: "accepted", state: "queued" })),
     ).toBe(false);
+  });
+
+  it("fire: accepted + failed is an error", () => {
+    expect(
+      fireToolIsError(
+        result({
+          submissionState: "accepted",
+          state: "failed",
+          terminal: true,
+          mayStillBeRunning: false,
+          error: "ProviderAuthError",
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("fire: not_sent / rejected / missing session are errors", () => {
@@ -112,6 +130,18 @@ describe("tool isError policy", () => {
     });
     expect(runToolIsError(timedOut)).toBe(true);
     expect(waitToolIsError(timedOut)).toBe(true);
+  });
+
+  it("run/wait: truncated terminal completion is an error", () => {
+    const truncated = result({
+      state: "indeterminate",
+      waitOutcome: "completed",
+      terminal: true,
+      mayStillBeRunning: false,
+      error: "Assistant finish is length (truncated).",
+    });
+    expect(runToolIsError(truncated)).toBe(true);
+    expect(waitToolIsError(truncated)).toBe(true);
   });
 
   it("run: succeeded is not an error", () => {
