@@ -35,7 +35,7 @@ function assistantMessage(opts: {
   finish?: string;
   completed?: number | null;
   created?: number;
-  error?: { name: string; message?: string };
+  error?: { name: string; message?: string; data?: { message?: string } };
   providerID?: string;
   modelID?: string;
   parts?: unknown[];
@@ -374,6 +374,26 @@ describe("classifyTask", () => {
     expect(result.state).not.toBe("succeeded");
     expect(result.terminal).toBe(true);
     expect(result.error).toMatch(/ProviderAuthError/);
+    expect(result.error).toMatch(/not authorized/);
+  });
+
+  it("FUP-010: assistant error.data.message is preserved after redaction", () => {
+    const failed = assistantMessage({
+      id: "msg_data",
+      parentID: REQUEST,
+      finish: "stop",
+      text: "all good",
+      error: {
+        name: "APIError",
+        data: { message: "provider exploded sk-abcdefghijklmnopqrstuvwxyz" },
+      },
+    });
+    const result = classifyTask(obs({ assistantMessages: [failed] }));
+    expect(result.state).toBe("failed");
+    expect(result.error).toMatch(/APIError/);
+    expect(result.error).toMatch(/provider exploded/);
+    expect(result.error).toMatch(/Origin: assistant/);
+    expect(result.error).not.toMatch(/sk-abcdefghijklmnopqrstuvwxyz/);
   });
 
   it("JOB-06: APIError with nonempty text is failed", () => {
@@ -633,5 +653,18 @@ describe("classifyTask", () => {
     expect(result.state).not.toBe("succeeded");
     expect(result.state).toBe("queued");
     expect(result.rawSessionState).toBe("idle");
+  });
+
+  it("FUP-008: missing observed model identity is MODEL UNVERIFIED, not success", () => {
+    const done = assistantMessage({
+      parentID: REQUEST,
+      finish: "stop",
+    });
+    delete (done.info as { providerID?: string }).providerID;
+    delete (done.info as { modelID?: string }).modelID;
+    const result = classifyTask(obs({ assistantMessages: [done] }));
+    expect(result.state).not.toBe("succeeded");
+    expect(result.error).toMatch(/MODEL UNVERIFIED/);
+    expect(result.terminal).toBe(true);
   });
 });

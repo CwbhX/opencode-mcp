@@ -10,6 +10,7 @@ import { z } from "zod";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { resolveModelSelection } from "./model-selection.js";
+import { analyzeTypedMessage, normalizeTransportError } from "./typed-outcome.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -367,73 +368,20 @@ export function safeStringify(
 }
 
 /**
- * Analyze an AI message response for signs of failure:
- *  - Completely empty (null/undefined)
- *  - Has parts but no text content (provider returned nothing)
- *  - Contains error indicators in parts
- *
- * Returns a diagnostic object with `isEmpty`, `hasError`, and `warning` text.
+ * Analyze an AI message response using typed assistant/protocol outcomes.
+ * Ordinary model text is never treated as HTTP or provider authentication failure.
  */
 export function analyzeMessageResponse(response: unknown): {
   isEmpty: boolean;
   hasError: boolean;
   warning: string | null;
 } {
-  if (response === null || response === undefined) {
-    return {
-      isEmpty: true,
-      hasError: false,
-      warning:
-        "The AI returned an empty response. This usually means the provider " +
-        "is not configured or the API key is missing/invalid. " +
-        "Use `opencode_setup` to check provider status, or " +
-        "`opencode_auth_set` to configure an API key.",
-    };
-  }
-
-  const r = response as any;
-  const parts = Array.isArray(r?.parts) ? r.parts : [];
-
-  // Check for error parts
-  const errorParts = parts.filter(
-    (p: any) =>
-      p.error ||
-      (p.type === "tool-result" && p.error) ||
-      (typeof p.text === "string" && /\b(error|unauthorized|forbidden|invalid.?key)\b/i.test(p.text)),
-  );
-  if (errorParts.length > 0) {
-    const firstError =
-      errorParts[0].error ??
-      errorParts[0].text ??
-      JSON.stringify(errorParts[0]);
-    return {
-      isEmpty: false,
-      hasError: true,
-      warning:
-        `The response contains an error: ${typeof firstError === "string" ? firstError : JSON.stringify(firstError)}. ` +
-        "This may indicate an authentication issue. " +
-        "Use `opencode_auth_set` to verify your API key.",
-    };
-  }
-
-  // Check if there's any actual text content
-  const textContent = parts
-    .filter((p: any) => p.type === "text")
-    .map((p: any) => (p.text ?? p.content ?? "").trim())
-    .join("");
-
-  if (parts.length === 0 || textContent === "") {
-    return {
-      isEmpty: true,
-      hasError: false,
-      warning:
-        "The AI returned a response with no text content. This usually means " +
-        "the provider API key is missing or the model is unavailable. " +
-        "Try a different provider/model, or use `opencode_auth_set` to configure credentials.",
-    };
-  }
-
-  return { isEmpty: false, hasError: false, warning: null };
+  const outcome = analyzeTypedMessage(response);
+  return {
+    isEmpty: outcome.isEmpty && !outcome.hasNonTextContent,
+    hasError: outcome.hasError,
+    warning: outcome.warning,
+  };
 }
 
 /**
@@ -583,7 +531,7 @@ export function toolResult(text: string, isError = false) {
 
 export function toolError(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e);
-  const suggestions = diagnoseError(msg);
+  const suggestions = diagnoseError(e, msg);
   const text = suggestions
     ? `Error: ${msg}\n\n**Suggestions:**\n${suggestions}`
     : `Error: ${msg}`;
@@ -595,13 +543,17 @@ export function toolError(e: unknown) {
  * string if no specific advice applies.  Keeps suggestions concise to
  * minimise token overhead.
  */
-function diagnoseError(msg: string): string {
+function diagnoseError(error: unknown, msg: string): string {
   const lower = msg.toLowerCase();
   const tips: string[] = [];
+  const normalized = normalizeTransportError(error);
 
-  if (lower.includes("api key") || lower.includes("401") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) {
-    tips.push("- Check credentials with `opencode_provider_test`");
-    tips.push("- Set a key with `opencode_auth_set`");
+  if (normalized.kind === "server_auth") {
+    tips.push("- OpenCode server Basic-auth failed; check OPENCODE_SERVER_USERNAME and OPENCODE_SERVER_PASSWORD");
+    tips.push("- This is not a cloud-provider key failure and is not a reason to switch models");
+  } else if (normalized.kind === "provider_auth" || lower.includes("providerautherror")) {
+    tips.push("- Cloud provider authentication failed for the selected provider");
+    tips.push("- Do not switch to another model automatically; configure that provider or report it unavailable");
   } else if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted")) {
     tips.push("- Use `opencode_run` for complex tasks (handles polling automatically)");
     tips.push("- Or use `opencode_message_send_async` + `opencode_wait` for manual control");

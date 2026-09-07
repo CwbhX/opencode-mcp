@@ -5,6 +5,10 @@ import type {
   TaskState,
   TrackingMode,
 } from "./bridge-types.js";
+import {
+  formatNormalizedError,
+  normalizeNamedError,
+} from "./typed-outcome.js";
 
 const KNOWN_RAW: ReadonlySet<string> = new Set(["idle", "busy", "retry"]);
 const FINAL_TURN_FINISH: ReadonlySet<string> = new Set(["stop", "end_turn"]);
@@ -123,22 +127,101 @@ export function correlateAssistants(params: {
   return matched;
 }
 
-function errorName(info: Record<string, unknown>): string | null {
-  const error = info.error;
-  if (error == null) return null;
-  if (typeof error === "string" && error.length > 0) return error;
-  if (isRecord(error) && typeof error.name === "string" && error.name) {
-    return error.name;
-  }
-  return "Error";
+function eventRecord(event: unknown): Record<string, unknown> | null {
+  if (!isRecord(event)) return null;
+  return event;
 }
 
-function errorMessage(info: Record<string, unknown>): string | null {
-  const error = info.error;
-  if (isRecord(error) && typeof error.message === "string" && error.message) {
-    return error.message;
+function eventType(event: Record<string, unknown>): string | undefined {
+  return typeof event.type === "string" ? event.type : undefined;
+}
+
+function eventSeq(event: Record<string, unknown>): number | undefined {
+  return typeof event.localSeq === "number" ? event.localSeq : undefined;
+}
+
+function eventSessionId(event: Record<string, unknown>): string | undefined {
+  if (isRecord(event.properties) && typeof event.properties.sessionID === "string") {
+    return event.properties.sessionID;
   }
+  if (isRecord(event.properties) && typeof event.properties.sessionId === "string") {
+    return event.properties.sessionId;
+  }
+  return undefined;
+}
+
+function eventMessageInfo(event: Record<string, unknown>): Record<string, unknown> | null {
+  if (!isRecord(event.properties)) return null;
+  if (isRecord(event.properties.info)) return event.properties.info;
   return null;
+}
+
+function eventsInWindow(obs: TaskObservations): Record<string, unknown>[] {
+  const baseline = obs.eventBaselineSeq ?? -1;
+  const out: Record<string, unknown>[] = [];
+  for (const event of obs.events) {
+    const rec = eventRecord(event);
+    if (!rec) continue;
+    const seq = eventSeq(rec);
+    if (seq !== undefined && seq <= baseline) continue;
+    out.push(rec);
+  }
+  return out;
+}
+
+interface EventEvidence {
+  attributedError: string | null;
+  attributedAbort: boolean;
+  uncertainSessionError: string | null;
+}
+
+function eventEvidence(obs: TaskObservations): EventEvidence {
+  const events = eventsInWindow(obs);
+  let attributedError: string | null = null;
+  let attributedAbort = false;
+  let uncertainSessionError: string | null = null;
+
+  for (const event of events) {
+    const type = eventType(event);
+    const sessionId = eventSessionId(event);
+
+    if (type === "message.updated") {
+      if (obs.sessionId && sessionId && sessionId !== obs.sessionId) continue;
+      const info = eventMessageInfo(event);
+      if (!info || info.role !== "assistant") continue;
+      if (obs.requestMessageID && info.parentID !== obs.requestMessageID) continue;
+      const named = normalizeNamedError(info.error, "assistant_message");
+      if (named) {
+        attributedError = formatNormalizedError(named);
+        attributedAbort = named.name === "MessageAbortedError";
+      }
+      continue;
+    }
+
+    if (type === "session.error") {
+      const named = normalizeNamedError(
+        isRecord(event.properties) ? event.properties.error : undefined,
+        "session_event",
+      );
+      const formatted = named
+        ? formatNormalizedError(named)
+        : "session.error event without a structured error payload";
+      if (!sessionId) {
+        uncertainSessionError =
+          `Session error without session ID (${formatted}); not attributed to this task.`;
+        continue;
+      }
+      if (obs.sessionId && sessionId !== obs.sessionId) continue;
+      if (obs.dedicatedNewSession === true && obs.requestMessageID) {
+        attributedError = formatted;
+        continue;
+      }
+      uncertainSessionError =
+        `${formatted} A session-only error on a shared session cannot be attributed with certainty.`;
+    }
+  }
+
+  return { attributedError, attributedAbort, uncertainSessionError };
 }
 
 function extractModel(
@@ -255,7 +338,7 @@ function questionBlock(
 
 function progressFromRaw(
   raw: RawSessionState,
-  hasUserMessage: boolean,
+  hasAllocatedRequest: boolean,
   observationGap: boolean,
   extras: Pick<ClassifiedTask, "rawSessionState" | "tracking" | "observedModel">,
 ): ClassifiedTask {
@@ -296,7 +379,7 @@ function progressFromRaw(
         "Observation gap: insufficient evidence; do not claim Done or resubmit.",
     };
   }
-  if (hasUserMessage) {
+  if (hasAllocatedRequest) {
     return inProgress("queued", {
       ...extras,
       error: null,
@@ -336,6 +419,7 @@ export function classifyTask(obs: TaskObservations): ClassifiedTask {
   const observedModel = extractModel(latest);
   const hasUserMessage = obs.userMessage != null;
   const shared = { rawSessionState, tracking, observedModel };
+  const evidence = eventEvidence(obs);
 
   if (obs.sessionMissing) {
     return {
@@ -360,6 +444,20 @@ export function classifyTask(obs: TaskObservations): ClassifiedTask {
       error: null,
       nextAction:
         "noReply context injection acknowledged; this is not a generated-task result",
+    };
+  }
+
+  if (evidence.attributedError) {
+    return {
+      ...shared,
+      state: evidence.attributedAbort ? "aborted" : "failed",
+      terminal: true,
+      mayStillBeRunning: false,
+      safeToResubmit: false,
+      error: evidence.attributedError,
+      nextAction: evidence.attributedAbort
+        ? "The assistant turn was aborted."
+        : "Attributed failure evidence arrived via events; do not resubmit automatically.",
     };
   }
 
@@ -399,18 +497,17 @@ export function classifyTask(obs: TaskObservations): ClassifiedTask {
   }
 
   if (latest) {
-    const named = errorName(latest);
+    const named = normalizeNamedError(latest.error, "assistant_message");
     if (named) {
-      const detail = errorMessage(latest);
-      const suffix = detail ? `: ${detail}` : "";
-      if (named === "MessageAbortedError") {
+      const formatted = formatNormalizedError(named);
+      if (named.name === "MessageAbortedError") {
         return {
           ...shared,
           state: "aborted",
           terminal: true,
           mayStillBeRunning: false,
           safeToResubmit: false,
-          error: `${named}${suffix}`,
+          error: formatted,
           nextAction: "The assistant turn was aborted (MessageAbortedError).",
         };
       }
@@ -420,8 +517,8 @@ export function classifyTask(obs: TaskObservations): ClassifiedTask {
         terminal: true,
         mayStillBeRunning: false,
         safeToResubmit: false,
-        error: `${named}${suffix}`,
-        nextAction: `Assistant ended with ${named}; do not treat leftover text as success.`,
+        error: formatted,
+        nextAction: `Assistant ended with ${named.name}; do not treat leftover text as success.`,
       };
     }
 
@@ -435,7 +532,12 @@ export function classifyTask(obs: TaskObservations): ClassifiedTask {
       if (pendingQuestions.length > 0) {
         return questionBlock(pendingQuestions, shared, obs.sessionId);
       }
-      return progressFromRaw(rawSessionState, hasUserMessage, false, shared);
+      return progressFromRaw(
+        rawSessionState,
+        hasUserMessage || Boolean(obs.requestMessageID),
+        false,
+        shared,
+      );
     }
 
     // JOB-15: content-filter => failed. length (truncated) => indeterminate,
@@ -485,6 +587,33 @@ export function classifyTask(obs: TaskObservations): ClassifiedTask {
       if (pendingQuestions.length > 0) {
         return questionBlock(pendingQuestions, shared, obs.sessionId);
       }
+      if (obs.permissionsObservationError || obs.questionsObservationError) {
+        return {
+          ...shared,
+          state: "indeterminate",
+          terminal: true,
+          mayStillBeRunning: false,
+          safeToResubmit: false,
+          error:
+            obs.permissionsObservationError ??
+            obs.questionsObservationError ??
+            "Pending-request observation failed.",
+          nextAction:
+            "Authoritative pending-request observation failed; do not infer that there are no blocks.",
+        };
+      }
+      if (obs.expectedModel && !observedModel) {
+        return {
+          ...shared,
+          state: "indeterminate",
+          terminal: true,
+          mayStillBeRunning: false,
+          safeToResubmit: false,
+          error: `MODEL UNVERIFIED: expected ${obs.expectedModel.providerID}/${obs.expectedModel.modelID}, but the assistant did not include observed providerID/modelID.`,
+          nextAction:
+            "MODEL UNVERIFIED: missing observed identity is not proof the requested model ran.",
+        };
+      }
       if (modelsMismatch(observedModel, obs.expectedModel)) {
         return {
           ...shared,
@@ -516,9 +645,34 @@ export function classifyTask(obs: TaskObservations): ClassifiedTask {
     return questionBlock(pendingQuestions, shared, obs.sessionId);
   }
 
+  if (evidence.uncertainSessionError) {
+    return {
+      ...shared,
+      state: "indeterminate",
+      terminal: null,
+      mayStillBeRunning: true,
+      safeToResubmit: false,
+      error: evidence.uncertainSessionError,
+      nextAction:
+        "Session error evidence is available but cannot be attributed with certainty; do not resubmit.",
+    };
+  }
+
+  if (obs.statusObservationError) {
+    return {
+      ...shared,
+      state: "indeterminate",
+      terminal: null,
+      mayStillBeRunning: true,
+      safeToResubmit: false,
+      error: obs.statusObservationError,
+      nextAction: "Session status observation failed; do not infer success.",
+    };
+  }
+
   return progressFromRaw(
     rawSessionState,
-    hasUserMessage,
+    hasUserMessage || Boolean(obs.requestMessageID),
     obs.observationGap,
     shared,
   );
