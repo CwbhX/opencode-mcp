@@ -306,13 +306,12 @@ describe("reconnect path", () => {
     return { urls };
   }
 
-  it("rebuilds the SDK client when ensureServer returns a different url", async () => {
-    const { urls } = mockFlakyThenOk();
+  it("does not move existing jobs when ensureServer would change the server URL", async () => {
+    mockFlakyThenOk();
 
     const client = makeClient({ autoServe: true });
     const originalApi = client.api;
 
-    isServerRunningMock.mockResolvedValueOnce({ healthy: false });
     ensureServerMock.mockResolvedValueOnce({
       running: true,
       version: "1.14.46",
@@ -320,13 +319,10 @@ describe("reconnect path", () => {
       url: "http://localhost:5000",
     });
 
-    await client.get("/health");
-
+    await expect(client.get("/health")).rejects.toThrow(/not moved/i);
     expect(ensureServerMock).toHaveBeenCalledOnce();
-    expect(client.getBaseUrl()).toBe("http://localhost:5000");
-    expect(urls[0]).toContain("http://localhost:4096");
-    expect(urls[urls.length - 1]).toContain("http://localhost:5000");
-    expect(client.api).not.toBe(originalApi);
+    expect(client.getBaseUrl()).toBe("http://localhost:4096");
+    expect(client.api).toBe(originalApi);
   });
 
   it("does not rebuild the SDK client when ensureServer returns the same url", async () => {
@@ -335,7 +331,6 @@ describe("reconnect path", () => {
     const client = makeClient({ autoServe: true });
     const originalApi = client.api;
 
-    isServerRunningMock.mockResolvedValueOnce({ healthy: false });
     ensureServerMock.mockResolvedValueOnce({
       running: true,
       version: "1.14.46",
@@ -354,11 +349,29 @@ describe("reconnect path", () => {
 
     for (let i = 0; i < 4; i++) {
       mockFlakyThenOk();
-      isServerRunningMock.mockResolvedValueOnce({ healthy: true, version: "1.14.46" });
+      ensureServerMock.mockResolvedValueOnce({
+        running: true,
+        version: "1.14.46",
+        managedByUs: true,
+        url: "http://localhost:4096",
+      });
       await client.get("/health");
     }
 
-    expect(isServerRunningMock).toHaveBeenCalledTimes(4);
+    expect(ensureServerMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("FUP-046: reconnect throws the later 401 diagnostic from ensureServer", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("fetch failed"));
+    ensureServerMock.mockRejectedValueOnce(
+      new Error(
+        "OpenCode server at http://localhost:4096 rejected the health probe with HTTP 401 (authentication failed).",
+      ),
+    );
+
+    const client = makeClient({ autoServe: true });
+    await expect(client.get("/health")).rejects.toThrow(/401|authentication failed/i);
+    expect(ensureServerMock).toHaveBeenCalledOnce();
   });
 
   it("does not auto-start or replay a mutation after a connection drop", async () => {

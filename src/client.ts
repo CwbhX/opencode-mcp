@@ -1,5 +1,5 @@
 import { createOpencodeClient, OpencodeClient as NativeClient } from "@opencode-ai/sdk";
-import { ensureServer, isServerRunning } from "./server-manager.js";
+import { ensureServer } from "./server-manager.js";
 import {
   encodeDirectoryHeader,
   isUnsupportedLiteralPercentPath,
@@ -157,33 +157,31 @@ export class OpenCodeClient {
       `Connection failed (attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}), attempting server reconnection...`,
     );
     try {
-      const status = await isServerRunning(
-        this.baseUrl,
-        this.username,
-        this.password,
-      );
-      if (!status.healthy) {
-        const ensured = await ensureServer({
-          baseUrl: this.baseUrl,
-          autoServe: true,
-          username: this.username,
-          password: this.password,
-        });
-        // Updating baseUrl is allowed for observational reads only.
-        // Mutations never enter this path, so a tracked job cannot be
-        // silently pointed at a new port after an ambiguous POST.
-        if (ensured.url) {
-          const normalized = ensured.url.replace(/\/$/, "");
-          if (normalized !== this.baseUrl) {
-            this.baseUrl = normalized;
-            this.api = this.buildSdkClient();
-          }
+      const ensured = await ensureServer({
+        baseUrl: this.baseUrl,
+        autoServe: true,
+        username: this.username,
+        password: this.password,
+        signal: opts?.signal,
+        deadlineAt: opts?.deadlineAt,
+      });
+      if (ensured.url) {
+        const normalized = ensured.url.replace(/\/$/, "");
+        if (normalized !== this.baseUrl) {
+          throw new Error(
+            `OpenCode reconnection would change the server URL from ${this.baseUrl} to ${normalized}. ` +
+              `Existing jobs are not moved. Recover with the session/message/directory tuple if intended.`,
+          );
         }
       }
     } catch (reconnectErr) {
       console.error(
         `Server reconnection failed: ${reconnectErr instanceof Error ? reconnectErr.message : String(reconnectErr)}`,
       );
+      if (reconnectErr instanceof Error) {
+        (reconnectErr as Error & { cause?: unknown }).cause = lastError;
+        throw reconnectErr;
+      }
       throw lastError;
     }
 

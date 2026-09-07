@@ -226,10 +226,30 @@ describe("probeHealth", () => {
     expect(result).toEqual({ classification: "connection_refused" });
   });
 
-  it("classifies generic fetch-failed network errors as connection_refused", async () => {
+  it("classifies generic fetch-failed network errors as incompatible_response, not connection_refused", async () => {
     fetchMock.mockRejectedValueOnce(new TypeError("fetch failed"));
     const result = await probeHealth("http://127.0.0.1:4096");
-    expect(result.classification).toBe("connection_refused");
+    expect(result.classification).not.toBe("connection_refused");
+    expect(result.classification).toBe("incompatible_response");
+  });
+
+  it("classifies DNS/TLS error codes as not connection_refused", async () => {
+    fetchMock.mockRejectedValueOnce(
+      Object.assign(new TypeError("fetch failed"), {
+        code: "ENOTFOUND",
+        cause: { code: "ENOTFOUND" },
+      }),
+    );
+    const dns = await probeHealth("http://127.0.0.1:4096");
+    expect(dns.classification).not.toBe("connection_refused");
+
+    fetchMock.mockRejectedValueOnce(
+      Object.assign(new Error("certificate"), {
+        code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+      }),
+    );
+    const tls = await probeHealth("http://127.0.0.1:4096");
+    expect(tls.classification).not.toBe("connection_refused");
   });
 
   it("classifies AbortError as probe_timed_out", async () => {
@@ -349,17 +369,18 @@ describe("startServer", () => {
     );
   });
 
-  it("returns version=undefined when post-start health check fails", async () => {
+  it("fails and closes the child when post-start health is not healthy", async () => {
+    const close = vi.fn();
     createOpencodeServerMock.mockResolvedValueOnce({
       url: "http://127.0.0.1:4096",
-      close: vi.fn(),
+      close,
     });
-    mockFetchDown(); // health check after start fails
+    mockFetchDown();
 
-    const result = await startServer("http://127.0.0.1:4096", 5000);
-
-    expect(result.url).toBe("http://127.0.0.1:4096");
-    expect(result.version).toBeUndefined();
+    await expect(startServer("http://127.0.0.1:4096", 5000)).rejects.toThrow(
+      /post-start health/,
+    );
+    expect(close).toHaveBeenCalledOnce();
   });
 });
 
@@ -562,7 +583,7 @@ describe("ensureServer", () => {
     expect(logged).not.toContain("Authorization");
   });
 
-  it("START-03: 401 probe does not call createOpencodeServer", async () => {
+  it("FUP-046/START-03: 401 probe does not call createOpencodeServer", async () => {
     mockFetchAuthFailed(401);
 
     await expect(
@@ -636,5 +657,52 @@ describe("ensureServer", () => {
     await expect(
       ensureServer({ baseUrl: "http://127.0.0.1:4096" }),
     ).rejects.toThrow(/not found|ENOENT/i);
+  });
+
+  it("FUP-052: rejects unsupported auto-start URL forms before spawn", async () => {
+    mockFetchDown();
+    await expect(
+      ensureServer({ baseUrl: "https://127.0.0.1:4096", autoServe: true }),
+    ).rejects.toThrow(/http:\/\//);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+
+    mockFetchDown();
+    await expect(
+      ensureServer({ baseUrl: "http://127.0.0.1:4096/v1", autoServe: true }),
+    ).rejects.toThrow(/base path/);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+
+    mockFetchDown();
+    await expect(
+      ensureServer({
+        baseUrl: "http://user:pass@127.0.0.1:4096",
+        autoServe: true,
+      }),
+    ).rejects.toThrow(/credentials/);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+
+    mockFetchDown();
+    await expect(
+      ensureServer({ baseUrl: "http://127.0.0.1", autoServe: true }),
+    ).rejects.toThrow(/explicit port/);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+  });
+
+  it("FUP-052: loopback IPv6 with explicit port is an allowed auto-start target", async () => {
+    mockFetchDown();
+    createOpencodeServerMock.mockResolvedValueOnce({
+      url: "http://[::1]:4096",
+      close: vi.fn(),
+    });
+    mockFetchHealthy("1.18.29");
+
+    const result = await ensureServer({
+      baseUrl: "http://[::1]:4096",
+      autoServe: true,
+    });
+    expect(result.running).toBe(true);
+    expect(createOpencodeServerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ hostname: "::1", port: 4096 }),
+    );
   });
 });
