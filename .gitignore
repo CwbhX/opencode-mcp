@@ -11,3 +11,5 @@ projects/
 # Local review/scratch artifacts (e.g. dumped PR comments)
 pr_comments.txt
 *_comments.txt
+/dev
+.DS_Store
