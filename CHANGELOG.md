@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-09-06
+
+Repair for OpenCode ~1.18 session / `prompt_async` / status / questions. The
+bridge now submits async work as accepted dispatch, correlates the submitted
+user message, and refuses to treat idle or a missing status entry as Done.
+
+### Added
+
+- **Question tools** — `opencode_question_list`, `opencode_question_reply`,
+  `opencode_question_reject` (`GET /question`, `POST /question/{id}/reply|reject`).
+- **`OPENCODE_REQUIRE_EXPLICIT_MODEL`** — when `true`, require an explicit or
+  configured full provider/model pair.
+- **`OPENCODE_ALLOWED_MODELS`** — JSON array of `provider/model` strings; no
+  paid-model substitution when the selected model is absent.
+- **`docs/compatibility.md`** — tool/endpoint inventory, test IDs, and
+  limitations.
+- **Layer B wire tests** — `tests/integration/mcp-wire.test.ts` against a
+  strict local HTTP fake.
+- **Opt-in Layer C/D scripts** — `npm run test:server` and `npm run test:live`
+  skip unless `OPENCODE_MCP_SERVER_TEST=1` / `OPENCODE_MCP_LIVE_TEST=1`.
+- **`zod` as a direct dependency** (was transitive-only).
+
+### Changed
+
+- **FIX-01** — `opencode_run` / `opencode_fire` / `opencode_message_send_async`
+  submit through `/prompt_async` with a single operation deadline.
+- **FIX-02** — Task correlation uses `jobId` + `requestMessageID`. Idle or an
+  absent `/session/status` entry is not success.
+- **FIX-03** — Endpoint-specific model serializers: prompt/shell model
+  **object**, command model **string**, top-level `variant` where supported.
+- **FIX-04** — Mutating HTTP calls are not retried. Dropped or 5xx POST
+  responses are ambiguous acceptance (`safeToResubmit: false`).
+- **FIX-05** — Session/directory identity is checked before mutation.
+  `directory` must be an existing absolute path; `~` and relative paths are
+  rejected.
+- **FIX-06** — Permission and question blocks are distinct results, not
+  silent success. No global `permission: "allow"` default workaround.
+- **FIX-07** — Classified health: auto-start only on loopback
+  connection-refused. 401/403/HTML/timeout do not spawn. SDK child is not
+  in-process; `fire` does not survive MCP exit.
+- **FIX-08** — Provider test and defaults never silently switch models.
+- **FIX-09** — Unicode/space paths stay supported; literal `%` segments are
+  rejected as unsupported.
+- **FIX-10** — README, configuration, tools, architecture, and changelog
+  describe the 1.18 contract honestly.
+- **FIX-11** — Full registered-tool inventory (83 tools including 3 question
+  tools). TUI tools are documented as conditional (need an attached TUI).
+
+### Stats
+
+- Tool count: 83 (13 workflow + 3 question + 67 other)
+- Resources: 10
+- Prompts: 6
+
 ## [1.11.0] - 2026-05-19
 
 Architectural release. Migrates server lifecycle to the official `@opencode-ai/sdk`, adds a tool for parallel project initialization, and lands a substantial security/correctness pass on the HTTP and SSE layers.

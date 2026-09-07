@@ -65,13 +65,16 @@ Dispatch a long-running task and keep working on something else:
   "title": "JWT refactor"
 }
 ```
-Returns immediately with a session ID.
+Returns an accepted handle: `jobId`, `sessionId`, `requestMessageID`,
+`directory`. The model may still be running. The job does not survive this
+MCP process exiting.
 
 **2. Check progress** — `opencode_check`:
 ```json
-{ "sessionId": "<session-id>" }
+{ "jobId": "<job-id>" }
 ```
-Returns: status (running/idle), todo progress (e.g. "3/7 done, current: Add JWT middleware"), files changed count.
+Or recover with `{ "sessionId": "<session-id>", "requestMessageID": "<msg-id>", "directory": "/absolute/project" }`.
+Idle or a missing status entry is **not Done**.
 
 **3. Get full results when done** — `opencode_conversation`:
 ```json
@@ -94,9 +97,9 @@ opencode_run({
 opencode_fire({ "prompt": "Add JWT authentication with login/register endpoints", "title": "Add auth" })
 opencode_fire({ "prompt": "Add rate limiting middleware and request logging", "title": "Add middleware" })
 
-// 3. Check both are done
-opencode_check({ "sessionId": "<auth-session-id>" })
-opencode_check({ "sessionId": "<middleware-session-id>" })
+// 3. Observe the returned handles (idle is not Done)
+opencode_check({ "jobId": "<auth-job-id>" })
+opencode_check({ "jobId": "<middleware-job-id>" })
 
 // 4. Review all changes
 opencode_review_changes({ "sessionId": "<auth-session-id>" })

@@ -7,7 +7,7 @@ opencode-mcp is a **stdio-based MCP server** that bridges MCP clients to the Ope
 ```
 ┌─────────────┐     stdio      ┌───────────────┐     HTTP      ┌─────────────────────────┐
 │  MCP Client  │ <────────────> │  opencode-mcp  │ <──────────> │  OpenCode Server        │
-│  (Claude,    │   JSON-RPC     │  (this package) │   REST API   │  (in-process via SDK,   │
+│  (Claude,    │   JSON-RPC     │  (this package) │   REST API   │  (SDK child on loopback │
 │   Cursor)    │                │                 │              │   or external `opencode │
 │              │                │                 │              │   serve` you launched)  │
 └─────────────┘                └───────────────┘              └─────────────────────────┘
@@ -18,8 +18,13 @@ opencode-mcp is a **stdio-based MCP server** that bridges MCP clients to the Ope
 ```
 src/
 ├── index.ts              Main entry point — creates server, registers everything
-├── server-manager.ts     Auto-detect + in-process start via @opencode-ai/sdk
-├── client.ts             HTTP client with retry, SSE, error categorization
+├── server-manager.ts     Classified health + loopback SDK-child auto-start
+├── client.ts             HTTP client (no mutation replay)
+├── http-transport.ts     204 / auth / deadline / retry-class
+├── task-manager.ts       prompt_async submit + job correlation
+├── task-status.ts        Evidence-to-status reducer (idle ≠ Done)
+├── model-selection.ts    Endpoint-specific model serializers
+├── request-context.ts    Absolute directory + session identity
 ├── helpers.ts            Response formatting + tool annotation constants
 ├── resources.ts          MCP Resources (10 browseable data endpoints)
 ├── prompts.ts            MCP Prompts (6 guided workflow templates)
@@ -27,8 +32,9 @@ src/
     ├── workflow.ts       High-level workflow tools (13) — start here
     ├── session.ts        Session lifecycle management (20)
     ├── message.ts        Message/prompt operations (6)
+    ├── question.ts       Pending user questions (3)
     ├── file.ts           File and search operations (6)
-    ├── tui.ts            TUI remote control (9)
+    ├── tui.ts            TUI remote control (9, need attached TUI)
     ├── config.ts         Configuration management (3)
     ├── provider.ts       Provider and authentication (6)
     ├── misc.ts           System, agents, LSP, MCP, logging (12)
@@ -41,7 +47,7 @@ src/
 
 | Primitive | Count | Purpose |
 |---|---|---|
-| **Tools** | 80 | Actions the LLM can take |
+| **Tools** | 83 | Actions the LLM can take (13 workflow + 3 question + 67 other) |
 | **Resources** | 10 | Data the LLM can browse |
 | **Prompts** | 6 | Guided multi-step workflows |
 
@@ -54,7 +60,10 @@ Tools are in two layers:
 - **Low-level** — 1:1 mapping to OpenCode API endpoints (session, message, file, etc.)
 - **Workflow** — Composite operations that combine multiple calls (`opencode_ask`, `opencode_run`, `opencode_fire`, etc.)
 
-The workflow layer drastically reduces tool calls. Instead of "create session, send message, parse response", it's one `opencode_ask` call. For long-running tasks, `opencode_run` handles session creation + async dispatch + polling in one call. `opencode_fire` + `opencode_check` enables background work with lightweight monitoring.
+The workflow layer reduces tool calls. `opencode_ask` is a sync prompt.
+`opencode_run` / `opencode_fire` submit through `/prompt_async`. `fire`
+returns an accepted handle (`jobId`, `sessionId`, `requestMessageID`,
+`directory`); `check` / `wait` observe that handle. Idle is not Done.
 
 ### Tool Annotations
 
@@ -73,28 +82,45 @@ Raw API responses are deeply nested JSON. The `helpers.ts` module transforms the
 
 `OpenCodeClient` handles:
 
-- **Automatic retry** — Exponential backoff for 429, 502, 503, 504
+- **Observational-read retry** — Bounded backoff for GET 429/502/503/504
+- **No mutation replay** — POST/PUT/PATCH/DELETE are not retried. A dropped
+  or 5xx mutating response is `AmbiguousAcceptanceError` (`safeToResubmit: false`)
 - **Error categorization** — `OpenCodeError` with `.isTransient`, `.isNotFound`, `.isAuth`
-- **204 No Content** — Properly handled
+- **204 No Content** — Returned as `undefined` without JSON parse (`/prompt_async`)
 - **SSE streaming** — Async generator for Server-Sent Events
-- **Directory validation** — Paths are normalized (resolved to absolute, trailing slashes removed) and validated (must exist on disk) before being sent as the `x-opencode-directory` header
-- **Lazy reconnection** — If all retries fail due to connection errors (`ECONNREFUSED`, `ENOTFOUND`, etc.) and `autoServe` is enabled, the client attempts to restart the OpenCode server and retry once (up to 3 reconnection attempts per MCP session)
+- **Directory validation** — Absolute existing directories only; `~` and
+  relative paths are rejected. Sent as `x-opencode-directory`
+- **Read reconnect** — Connection-refused GETs may probe/auto-start on
+  loopback. Auth failures never spawn or replay a POST
 
 ### Default Provider/Model
 
-Tools that accept `providerID` and `modelID` apply a three-tier resolution:
+Tools that accept `providerID` and `modelID` resolve a **full pair** only:
 
-1. **Explicit params** — If both are passed to the tool call, use them
-2. **Env-var defaults** — If `OPENCODE_DEFAULT_PROVIDER` and `OPENCODE_DEFAULT_MODEL` are set, use them as fallback
-3. **Server default** — If neither is available, let the OpenCode server decide (may result in empty responses if no provider is configured)
+1. **Explicit params** — both `providerID` and `modelID` on the call
+2. **Env-var defaults** — both `OPENCODE_DEFAULT_PROVIDER` and `OPENCODE_DEFAULT_MODEL`
+3. **Server selection** — only when neither pair is set **and**
+   `OPENCODE_REQUIRE_EXPLICIT_MODEL` is not `true`
 
-This is implemented via `applyModelDefaults()` in `helpers.ts`, called from all 8 tools that accept model params.
+A single identifier is rejected and is not merged with a default. Optional
+`OPENCODE_ALLOWED_MODELS` (JSON array of `provider/model` strings) rejects
+pairs outside the list. There is no paid fallback and no hardcoded free-model
+catalog. `variant` is a separate top-level field on prompt/command requests.
 
 ### Auto-Start
 
-On startup, the MCP probes `OPENCODE_BASE_URL/global/health`. If a server is already running there (e.g. an externally-launched `opencode serve` or another MCP instance), it attaches. Otherwise it spawns one **in-process** via `createOpencodeServer()` from `@opencode-ai/sdk` — the HTTP server binds to the requested host/port from inside the MCP process itself, with no child-process or binary-discovery step. Shutdown handlers (`SIGINT`, `SIGTERM`, `exit`) call the SDK's `close()` so the port is released cleanly when the MCP exits.
+On startup, the MCP probes `OPENCODE_BASE_URL/global/health`:
 
-Concurrent `ensureServer()` calls are coalesced per `baseUrl` via an in-flight `Map<string, Promise>` so two simultaneous tool calls during cold-start can't race into `EADDRINUSE`. Calls targeting different baseUrls each get their own startup promise.
+- **Healthy** — attach; do not spawn.
+- **Connection refused** on loopback — `createOpencodeServer()` starts an
+  OpenCode **SDK child process**. This is not an in-process engine.
+  `opencode_fire` jobs do not survive this MCP process exiting.
+- **401/403, HTML, timeout, remote host** — classified error; **do not spawn**.
+
+Shutdown handlers (`SIGINT`, `SIGTERM`, `exit`) close an owned child. An
+externally launched `opencode serve` is left running.
+
+Concurrent `ensureServer()` calls are coalesced per `baseUrl`.
 
 ## Data Flow
 
@@ -130,10 +156,17 @@ Concurrent `ensureServer()` calls are coalesced per `baseUrl` via an in-flight `
 
 Each tool group is a file exporting a `register*` function that receives `(server, client)`. New tool groups can be added without touching the entry point.
 
-### Permission Handling
+### Permission and question handling
 
-In headless mode, OpenCode may pause sessions waiting for tool-use permissions (e.g. file writes, shell commands). This blocks progress silently. The MCP server addresses this with:
+In headless mode, OpenCode may pause a session for a permission or a user
+question. That is a **blocked** result, not success. Do **not** set global
+`permission: "allow"` as the default workaround.
 
-- **`opencode_permission_list`** — Lists all pending permission requests across sessions so the LLM can detect and unblock stuck sessions
-- **`opencode_session_permission`** — Replies to a specific permission request with `once`, `always`, or `reject`
-- **Recommended config** — Set `"permission": "allow"` in `opencode.json` or call `opencode_config_update({ config: { permission: "allow" } })` at runtime to auto-approve all tool use in headless mode
+- **`opencode_permission_list` / `opencode_session_permission`** — list and
+  reply `once` / `always` / `reject`
+- **`opencode_question_list` / `opencode_question_reply` /
+  `opencode_question_reject`** — list and answer (selected-label arrays in
+  question order) or reject
+
+Never auto-approve or invent answers just to finish a wait. See
+[compatibility.md](compatibility.md) for the endpoint inventory.
