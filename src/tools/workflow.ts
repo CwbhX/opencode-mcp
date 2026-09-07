@@ -10,10 +10,8 @@ import { OpenCodeClient, OpenCodeError } from "../client.js";
 import {
   formatMessageResponse,
   formatMessageList,
-  analyzeMessageResponse,
   isProviderConfigured,
   redactSecrets,
-  normalizeDirectory,
   toolResult,
   toolError,
   directoryParam,
@@ -21,12 +19,13 @@ import {
 } from "../helpers.js";
 import {
   buildPromptBody,
-  parseAllowedModels,
-  resolveModelSelection,
+  assertModelPolicy,
+  resolveConfiguredModel,
 } from "../model-selection.js";
 import {
   assertSessionDirectory,
   createDeadline,
+  remainingBudgetMs,
   validateDirectory,
   validateDurationSeconds,
   validateIntervalMs,
@@ -40,22 +39,14 @@ import {
 } from "../task-result-format.js";
 import { getSharedTaskManager, type TaskSelector } from "../task-manager.js";
 import { normalizeRawSessionState } from "../task-status.js";
+import { analyzeTypedMessage } from "../typed-outcome.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
 function resolveWorkflowModel(providerID?: string, modelID?: string) {
-  return resolveModelSelection({
-    providerID,
-    modelID,
-    defaults: {
-      providerID: process.env.OPENCODE_DEFAULT_PROVIDER,
-      modelID: process.env.OPENCODE_DEFAULT_MODEL,
-    },
-    requireExplicit: process.env.OPENCODE_REQUIRE_EXPLICIT_MODEL === "true",
-    allowedModels: parseAllowedModels(process.env.OPENCODE_ALLOWED_MODELS),
-  });
+  return resolveConfiguredModel({ providerID, modelID });
 }
 
 function sessionDirectoryOf(payload: unknown): string | undefined {
@@ -164,7 +155,11 @@ function summarizeTask(result: TaskResult, kind: "fire" | "run" | "wait"): strin
   const session = result.sessionId ?? "(unknown session)";
   const lines: string[] = [];
   if (kind === "fire") {
-    if (result.submissionState === "accepted") {
+    if (result.state === "failed" || result.state === "aborted") {
+      lines.push(`Task ${result.state} for session: ${session}`);
+      lines.push(`Job: ${result.jobId}`);
+      lines.push("This is not ongoing autonomous work.");
+    } else if (result.submissionState === "accepted" && result.terminal !== true) {
       lines.push(`Task dispatched to session: ${session}`);
       lines.push(`Job: ${result.jobId}`);
       lines.push("");
@@ -442,7 +437,7 @@ export function registerWorkflowTools(
         .describe("Optional system prompt override"),
       directory: directoryParam,
     },
-    async ({ prompt, title, providerID, modelID, variant, agent, system, directory }) => {
+    async ({ prompt, title, providerID, modelID, variant, agent, system, directory }, extra) => {
       try {
         const model = resolveWorkflowModel(providerID, modelID);
 
@@ -460,14 +455,17 @@ export function registerWorkflowTools(
           system,
         });
 
-        const response = await client.post(
-          `/session/${sessionId}/message`,
-          body,
-          { directory },
+        const response = await getSharedTaskManager(client).withSessionTurn(
+          { sessionId, directory },
+          () =>
+            client.post(`/session/${sessionId}/message`, body, {
+              directory,
+              signal: extra?.signal,
+            }),
         );
 
         // 3. Analyze for auth / empty response issues
-        const analysis = analyzeMessageResponse(response);
+        const analysis = analyzeTypedMessage(response);
 
         // 4. Format and return
         const formatted = formatMessageResponse(response);
@@ -497,7 +495,7 @@ export function registerWorkflowTools(
       agent: z.string().optional().describe("Agent to use"),
       directory: directoryParam,
     },
-    async ({ sessionId, prompt, providerID, modelID, variant, agent, directory }) => {
+    async ({ sessionId, prompt, providerID, modelID, variant, agent, directory }, extra) => {
       try {
         const model = resolveWorkflowModel(providerID, modelID);
         if (directory) {
@@ -519,13 +517,16 @@ export function registerWorkflowTools(
           agent,
         });
 
-        const response = await client.post(
-          `/session/${sessionId}/message`,
-          body,
-          { directory },
+        const response = await getSharedTaskManager(client).withSessionTurn(
+          { sessionId, directory },
+          () =>
+            client.post(`/session/${sessionId}/message`, body, {
+              directory,
+              signal: extra?.signal,
+            }),
         );
 
-        const analysis = analyzeMessageResponse(response);
+        const analysis = analyzeTypedMessage(response);
         const formatted = formatMessageResponse(response);
         const parts: string[] = [];
         if (formatted) parts.push(formatted);
@@ -627,7 +628,7 @@ export function registerWorkflowTools(
       try {
         // Validate directory early — before Promise.all with .catch(() => null)
         // swallows the validation error.
-        directory = normalizeDirectory(directory) as typeof directory;
+        directory = validateDirectory(directory) as typeof directory;
 
         const [project, path, vcs, config, agents] = await Promise.all([
           client.get("/project/current", undefined, directory).catch(() => null),
@@ -721,7 +722,7 @@ export function registerWorkflowTools(
         .describe("Polling interval in ms (default: 250)"),
       directory: directoryParam,
     },
-    async ({ sessionId, jobId, requestMessageID, timeoutSeconds, pollIntervalMs, directory }) => {
+    async ({ sessionId, jobId, requestMessageID, timeoutSeconds, pollIntervalMs, directory }, extra) => {
       try {
         const deadlineAt = createDeadline(
           validateDurationSeconds(timeoutSeconds, 120, 3600) * 1000,
@@ -734,6 +735,7 @@ export function registerWorkflowTools(
         const manager = getSharedTaskManager(client);
         const result = await manager.wait(selector, {
           deadlineAt,
+          signal: extra?.signal,
           ...(interval !== undefined ? { pollIntervalMs: interval } : {}),
         });
         return toolFromTask(summarizeTask(result, "wait"), result, waitToolIsError(result));
@@ -797,11 +799,18 @@ export function registerWorkflowTools(
               ),
             );
           }
-          model = { providerID: providerId, modelID: resolvedModelID };
+          try {
+            model = assertModelPolicy({
+              providerID: providerId,
+              modelID: resolvedModelID,
+            });
+          } catch (error) {
+            return toolError(error);
+          }
         }
 
         const session = (await client.post("/session", {
-          title: `[test] ${providerId}`,
+          title: `[probe] ${providerId}/${model.modelID}`,
         }, { directory })) as Record<string, unknown>;
         sessionId = session.id as string;
 
@@ -817,7 +826,7 @@ export function registerWorkflowTools(
           { directory },
         );
 
-        const analysis = analyzeMessageResponse(response);
+        const analysis = analyzeTypedMessage(response);
         const formatted = formatMessageResponse(response);
         const observed = observedModelFromMessage(response);
         const mismatch =
@@ -825,11 +834,15 @@ export function registerWorkflowTools(
           observed.providerID !== model.providerID ||
           observed.modelID !== model.modelID;
 
-        try {
-          await client.delete(`/session/${sessionId}`, undefined, directory);
-        } catch { /* best-effort cleanup after a known terminal outcome */ }
+        const establishedTerminal =
+          analysis.hasError || !analysis.isEmpty || analysis.hasNonTextContent;
+        if (establishedTerminal) {
+          try {
+            await client.delete(`/session/${sessionId}`, undefined, directory);
+          } catch { /* best-effort cleanup after a known terminal outcome */ }
+        }
 
-        if (analysis.hasError || analysis.isEmpty || mismatch) {
+        if (analysis.hasError || (analysis.isEmpty && !analysis.hasNonTextContent) || mismatch) {
           const reason = mismatch
             ? `MODEL MISMATCH: expected ${model.providerID}/${model.modelID}` +
               (observed
@@ -837,7 +850,10 @@ export function registerWorkflowTools(
                 : ", but the response did not include providerID/modelID.")
             : (analysis.warning ?? "Unknown error — no response received.");
           return toolResult(
-            `Provider "${providerId}" FAILED.\n\n${reason}`,
+            `Provider "${providerId}" FAILED.\n\n${reason}` +
+              (!establishedTerminal && sessionId
+                ? `\n\nSession ${sessionId} was kept for diagnosis.`
+                : ""),
             true,
           );
         }
@@ -885,7 +901,7 @@ export function registerWorkflowTools(
         .describe("Max seconds to wait for completion (default: 600 = 10 minutes)"),
       directory: directoryParam,
     },
-    async ({ prompt, sessionId, title, providerID, modelID, variant, agent, maxDurationSeconds, directory }) => {
+    async ({ prompt, sessionId, title, providerID, modelID, variant, agent, maxDurationSeconds, directory }, extra) => {
       try {
         const deadlineAt = createDeadline(
           validateDurationSeconds(maxDurationSeconds, 600, 3600) * 1000,
@@ -901,15 +917,23 @@ export function registerWorkflowTools(
           agent,
           directory,
           deadlineAt,
+          signal: extra?.signal,
         });
         if (submitted.submissionState !== "accepted" || submitted.terminal === true) {
+          const early =
+            submitted.terminal === true && submitted.submissionState === "accepted"
+              ? { ...submitted, waitOutcome: submitted.waitOutcome ?? "completed" }
+              : submitted;
           return toolFromTask(
-            summarizeTask(submitted, "run"),
-            submitted,
-            runToolIsError(submitted),
+            summarizeTask(early, "run"),
+            early,
+            runToolIsError(early),
           );
         }
-        const waited = await manager.wait({ jobId: submitted.jobId }, { deadlineAt });
+        const waited = await manager.wait({ jobId: submitted.jobId }, {
+          deadlineAt,
+          signal: extra?.signal,
+        });
         return toolFromTask(summarizeTask(waited, "run"), waited, runToolIsError(waited));
       } catch (e) {
         return toolError(e);
@@ -934,7 +958,7 @@ export function registerWorkflowTools(
       agent: z.string().optional().describe("Agent to use"),
       directory: directoryParam,
     },
-    async ({ prompt, sessionId, title, providerID, modelID, variant, agent, directory }) => {
+    async ({ prompt, sessionId, title, providerID, modelID, variant, agent, directory }, extra) => {
       try {
         const deadlineAt = createDeadline(
           validateDurationSeconds(undefined, 30, 120) * 1000,
@@ -950,6 +974,7 @@ export function registerWorkflowTools(
           agent,
           directory,
           deadlineAt,
+          signal: extra?.signal,
         });
         return toolFromTask(summarizeTask(result, "fire"), result, fireToolIsError(result));
       } catch (e) {
@@ -976,7 +1001,7 @@ export function registerWorkflowTools(
       directory: directoryParam,
     },
     readOnly,
-    async ({ sessionId, jobId, requestMessageID, detailed, directory }) => {
+    async ({ sessionId, jobId, requestMessageID, detailed, directory }, extra) => {
       try {
         const dir = validateDirectory(directory);
         const selector = taskSelector({
@@ -986,8 +1011,13 @@ export function registerWorkflowTools(
           directory: dir,
         });
         const manager = getSharedTaskManager(client);
-        const result = await manager.check(selector);
+        const deadlineAt = createDeadline(15_000);
+        const result = await manager.check(selector, {
+          deadlineAt,
+          signal: extra?.signal,
+        });
         const sid = result.sessionId ?? sessionId;
+        const scopedDir = result.directory ?? dir;
 
         const lines: string[] = [];
         let title = "(untitled)";
@@ -996,7 +1026,7 @@ export function registerWorkflowTools(
             const sessionInfo = (await client.get(
               `/session/${sid}`,
               undefined,
-              dir,
+              scopedDir,
             )) as Record<string, unknown> | null;
             if (sessionInfo && typeof sessionInfo.title === "string") {
               title = sessionInfo.title;
@@ -1014,12 +1044,12 @@ export function registerWorkflowTools(
           lines.push("Tracking is untracked. Do not claim this particular task succeeded.");
         }
 
-        if (sid) {
+        if (sid && remainingBudgetMs(deadlineAt) > 50) {
           try {
             const todos = (await client.get(
               `/session/${sid}/todo`,
               undefined,
-              dir,
+              scopedDir,
             )) as Array<Record<string, unknown>> | null;
             if (Array.isArray(todos) && todos.length > 0) {
               const completed = todos.filter((t) => t.status === "completed").length;
@@ -1036,7 +1066,7 @@ export function registerWorkflowTools(
           } catch { /* optional */ }
 
           try {
-            const diffs = await client.get(`/session/${sid}/diff`, undefined, dir) as unknown[];
+            const diffs = await client.get(`/session/${sid}/diff`, undefined, scopedDir) as unknown[];
             if (Array.isArray(diffs) && diffs.length > 0) {
               lines.push(`Files changed: ${diffs.length}`);
             }
@@ -1053,7 +1083,7 @@ export function registerWorkflowTools(
                 const lastMessages = await client.get(
                   `/session/${sid}/message`,
                   { limit: "1" },
-                  dir,
+                  scopedDir,
                 );
                 if (Array.isArray(lastMessages) && lastMessages.length > 0) {
                   const lastMsg = formatMessageResponse(lastMessages[lastMessages.length - 1]);
@@ -1090,7 +1120,7 @@ export function registerWorkflowTools(
       try {
         // Validate directory early — before Promise.all with .catch(() => null)
         // swallows the validation error.
-        directory = normalizeDirectory(directory) as typeof directory;
+        directory = validateDirectory(directory) as typeof directory;
 
         const [health, providerRaw, sessions, vcs] = await Promise.all([
           client.get("/global/health", undefined, directory).catch(() => null),

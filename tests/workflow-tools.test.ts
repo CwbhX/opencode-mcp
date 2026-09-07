@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OpenCodeClient } from "../src/client.js";
 import { AmbiguousAcceptanceError } from "../src/bridge-types.js";
@@ -85,10 +86,11 @@ function sessionAndPromptClient(options?: {
   status?: Record<string, unknown>;
 }) {
   const sessionId = options?.sessionId ?? "ses-workflow-1";
+  const directory = tmpdir();
   let requestMessageID: string | undefined;
 
   const post = vi.fn((path: string, body?: Record<string, unknown>) => {
-    if (path === "/session") return Promise.resolve({ id: sessionId });
+    if (path === "/session") return Promise.resolve({ id: sessionId, directory });
     if (path.endsWith("/prompt_async")) {
       requestMessageID =
         typeof body?.messageID === "string" ? body.messageID : undefined;
@@ -102,7 +104,9 @@ function sessionAndPromptClient(options?: {
   });
 
   const get = vi.fn((path: string) => {
-    if (path === `/session/${sessionId}`) return Promise.resolve({ id: sessionId });
+    if (path === `/session/${sessionId}`) {
+      return Promise.resolve({ id: sessionId, directory });
+    }
     if (path === "/session/status") {
       return Promise.resolve(options?.status ?? {});
     }
@@ -284,9 +288,14 @@ describe("opencode_check and opencode_wait selectors", () => {
   });
 
   it("session-only check is untracked and does not treat idle as Done", async () => {
+    const directory = tmpdir();
     const client = createMockClient({
       get: vi.fn().mockImplementation((path: string) => {
+        if (path === "/session/s1") {
+          return Promise.resolve({ id: "s1", directory });
+        }
         if (path === "/session/status") return Promise.resolve({ s1: "idle" });
+        if (path === "/permission" || path === "/question") return Promise.resolve([]);
         return Promise.resolve([]);
       }),
     });
@@ -302,8 +311,12 @@ describe("opencode_check and opencode_wait selectors", () => {
 
   it("wait with requestMessageID completes only for a correlated assistant", async () => {
     const requestMessageID = "msg_user_turn";
+    const directory = tmpdir();
     const client = createMockClient({
       get: vi.fn().mockImplementation((path: string) => {
+        if (path === "/session/s1") {
+          return Promise.resolve({ id: "s1", directory });
+        }
         if (path === "/session/status") return Promise.resolve({});
         if (path === "/permission" || path === "/question") return Promise.resolve([]);
         if (path === "/session/s1/message") {

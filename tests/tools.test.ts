@@ -314,7 +314,7 @@ describe("Tool handlers", () => {
       const askHandler = tools.get("opencode_ask")!;
       const result = await askHandler({ prompt: "test" });
       expect(result.content[0].text).toContain("WARNING");
-      expect(result.content[0].text).toContain("empty response");
+      expect(result.content[0].text).toMatch(/protocol\/observation failure|absent/i);
     });
 
     it("warns when response has no text content", async () => {
@@ -358,7 +358,7 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_reply")!;
       const result = await handler({ sessionId: "s1", prompt: "follow up" });
       expect(result.content[0].text).toContain("WARNING");
-      expect(result.content[0].text).toContain("empty response");
+      expect(result.content[0].text).toMatch(/protocol\/observation failure|absent/i);
     });
 
     it("does not warn for valid reply", async () => {
@@ -1205,7 +1205,7 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_message_send")!;
       const result = await handler({ sessionId: "s1", text: "hello" });
       expect(result.content[0].text).toContain("WARNING");
-      expect(result.content[0].text).toContain("empty response");
+      expect(result.content[0].text).toMatch(/protocol\/observation failure|absent/i);
     });
 
     it("warns when response has no text content", async () => {
@@ -1487,6 +1487,38 @@ describe("Tool handlers", () => {
       expect(result.content[0].text).toContain("API timeout");
       expect(result.content[0].text).toContain("test-session");
       expect(deleteMock).not.toHaveBeenCalled();
+    });
+
+    it("FUP-005: discovered default outside the allowlist is rejected with no session/prompt", async () => {
+      const previous = process.env.OPENCODE_ALLOWED_MODELS;
+      process.env.OPENCODE_ALLOWED_MODELS = JSON.stringify([
+        "opencode/muse-spark-1.3-contributor-free",
+      ]);
+      try {
+        const getMock = vi.fn().mockResolvedValue({
+          all: [{ id: "anthropic", default: "claude-3", models: { "claude-3": {} } }],
+        });
+        const postMock = vi.fn();
+        const deleteMock = vi.fn();
+        const mockClient = createMockClient({ get: getMock, post: postMock, delete: deleteMock });
+        const tools = new Map<string, Function>();
+        const mockServer = {
+          tool: vi.fn((...args: unknown[]) => {
+            tools.set(args[0] as string, args[args.length - 1] as Function);
+          }),
+        } as unknown as McpServer;
+        registerWorkflowTools(mockServer, mockClient);
+
+        const handler = tools.get("opencode_provider_test")!;
+        const result = await handler({ providerId: "anthropic" });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/not in the allowed models list/i);
+        expect(postMock).not.toHaveBeenCalled();
+        expect(deleteMock).not.toHaveBeenCalled();
+      } finally {
+        if (previous === undefined) delete process.env.OPENCODE_ALLOWED_MODELS;
+        else process.env.OPENCODE_ALLOWED_MODELS = previous;
+      }
     });
 
     it("rejects before prompt when the provider has no resolvable default model", async () => {
@@ -2307,7 +2339,7 @@ describe("Tool handlers", () => {
       // the point is we get a clear error, not UNREACHABLE.
       const result = await handler({ directory: "./nonexistent-dir" });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("does not exist");
+      expect(result.content[0].text).toMatch(/absolute path|relative paths/i);
       expect(result.content[0].text).not.toContain("UNREACHABLE");
     });
 

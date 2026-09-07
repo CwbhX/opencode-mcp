@@ -14,6 +14,8 @@ const submitAsync = vi.hoisted(() => vi.fn());
 vi.mock("../src/task-manager.js", () => ({
   getSharedTaskManager: vi.fn(() => ({
     submitAsync,
+    withSessionTurn: async (_params: unknown, fn: () => unknown) => fn(),
+    assertSessionTurnAvailable: () => undefined,
   })),
 }));
 
@@ -223,9 +225,7 @@ describe("message/session contracts", () => {
       expect(text).not.toMatch(/completed/i);
       expect(text).toContain("job_1");
       expect(text).toContain("msg_1");
-      expect(JSON.parse(text.slice(text.indexOf("{"))).submissionState).toBe(
-        "accepted",
-      );
+      expect(text).toContain('"submissionState": "accepted"');
     });
   });
 

@@ -3,8 +3,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OpenCodeClient } from "../client.js";
 import { AmbiguousAcceptanceError, OpenCodeError } from "../http-transport.js";
 import { toolError, formatSessionList, formatDiffResponse, toolResult, directoryParam, destructive, readOnly } from "../helpers.js";
-import { buildSummarizeBody } from "../model-selection.js";
+import { buildInitBody, buildSummarizeBody, resolveConfiguredModel } from "../model-selection.js";
 import { assertSessionDirectory, validateDirectory } from "../request-context.js";
+import { getSharedTaskManager } from "../task-manager.js";
 import { normalizeRawSessionState } from "../task-status.js";
 
 /** Format a single session object into a compact human-readable summary. */
@@ -271,8 +272,23 @@ export function registerSessionTools(
     },
     async ({ id, messageID, providerID, modelID, variant, directory }) => {
       try {
+        const model = resolveConfiguredModel({ providerID, modelID });
+        if (!model) {
+          throw new Error(
+            "init requires a policy-checked providerID/modelID pair; server-default selection is not used.",
+          );
+        }
         const scoped = await scopedSessionDirectory(client, id, directory);
-        await client.post(`/session/${id}/init`, { messageID, providerID, modelID, variant }, { directory: scoped });
+        const body = buildInitBody({
+          messageID,
+          providerID: model.providerID,
+          modelID: model.modelID,
+          variant,
+        });
+        await getSharedTaskManager(client).withSessionTurn(
+          { sessionId: id, directory: scoped },
+          () => client.post(`/session/${id}/init`, body, { directory: scoped }),
+        );
         return toolResult("AGENTS.md initialization started.");
       } catch (e) {
         return toolError(e);
@@ -393,9 +409,22 @@ export function registerSessionTools(
     },
     async ({ id, providerID, modelID, variant, directory }) => {
       try {
-        const body = buildSummarizeBody({ providerID, modelID, variant });
+        const model = resolveConfiguredModel({ providerID, modelID });
+        if (!model) {
+          throw new Error(
+            "summarize requires a policy-checked providerID/modelID pair; server-default selection is not used.",
+          );
+        }
+        const body = buildSummarizeBody({
+          providerID: model.providerID,
+          modelID: model.modelID,
+          variant,
+        });
         const scoped = await scopedSessionDirectory(client, id, directory);
-        await client.post(`/session/${id}/summarize`, body, { directory: scoped });
+        await getSharedTaskManager(client).withSessionTurn(
+          { sessionId: id, directory: scoped },
+          () => client.post(`/session/${id}/summarize`, body, { directory: scoped }),
+        );
         return toolResult("Session summarization started.");
       } catch (e) {
         return toolError(e);

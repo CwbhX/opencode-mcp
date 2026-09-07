@@ -5,7 +5,6 @@ import {
   toolResult,
   toolError,
   formatMessageResponse,
-  analyzeMessageResponse,
   formatMessageList,
   directoryParam,
 } from "../helpers.js";
@@ -13,29 +12,21 @@ import {
   buildCommandBody,
   buildPromptBody,
   buildShellBody,
-  parseAllowedModels,
-  resolveModelSelection,
+  resolveConfiguredModel,
 } from "../model-selection.js";
 import {
   assertSessionDirectory,
   createDeadline,
   validateDirectory,
 } from "../request-context.js";
+import { fireToolIsError, formatTaskResult } from "../task-result-format.js";
 import { getSharedTaskManager } from "../task-manager.js";
+import { analyzeTypedMessage } from "../typed-outcome.js";
 
 const ASYNC_SUBMIT_BUDGET_MS = 60_000;
 
 function resolveToolModel(providerID?: string, modelID?: string) {
-  return resolveModelSelection({
-    providerID,
-    modelID,
-    defaults: {
-      providerID: process.env.OPENCODE_DEFAULT_PROVIDER,
-      modelID: process.env.OPENCODE_DEFAULT_MODEL,
-    },
-    requireExplicit: process.env.OPENCODE_REQUIRE_EXPLICIT_MODEL === "true",
-    allowedModels: parseAllowedModels(process.env.OPENCODE_ALLOWED_MODELS),
-  });
+  return resolveConfiguredModel({ providerID, modelID });
 }
 
 function sessionDirectoryOf(payload: unknown): string | undefined {
@@ -59,27 +50,16 @@ async function assertExistingSessionDirectory(
   return requested;
 }
 
-function formatAsyncHandle(result: {
-  jobId: string;
-  sessionId?: string;
-  requestMessageID?: string;
-  directory?: string;
-  state: string;
-  submissionState: string;
-}): string {
-  const handle = {
-    jobId: result.jobId,
-    sessionId: result.sessionId,
-    requestMessageID: result.requestMessageID,
-    directory: result.directory,
-    state: result.state,
-    submissionState: result.submissionState,
-  };
+function formatAsyncHandle(result: import("../bridge-types.js").TaskResult): string {
   const line =
-    result.submissionState === "accepted"
-      ? "Message accepted asynchronously. Use opencode_wait or opencode_check to monitor this job."
-      : `Message was not accepted (submissionState=${result.submissionState}). Inspect the handle before retrying.`;
-  return `${line}\n\n${JSON.stringify(handle, null, 2)}`;
+    result.state === "failed" || result.state === "aborted"
+      ? `Async send ended in ${result.state} (submissionState=${result.submissionState}).`
+      : result.submissionState === "accepted"
+        ? "Message accepted asynchronously. Use opencode_wait or opencode_check to monitor this job."
+        : result.submissionState === "unknown"
+          ? "Message acceptance is unknown, not a known rejection. Inspect the handle; do not resend automatically."
+          : `Message was not accepted (submissionState=${result.submissionState}). Inspect the handle before retrying.`;
+  return formatTaskResult(line, result);
 }
 
 export function registerMessageTools(
@@ -178,6 +158,10 @@ export function registerMessageTools(
           sessionId,
           directory,
         );
+        const manager = getSharedTaskManager(client);
+        if (noReply === true) {
+          manager.assertSessionTurnAvailable(sessionId, scoped);
+        }
         const body = buildPromptBody({
           prompt: text,
           model,
@@ -186,20 +170,27 @@ export function registerMessageTools(
           system,
           noReply,
         });
-        const response = await client.post(
-          `/session/${sessionId}/message`,
-          body,
-          { directory: scoped },
-        );
+        const post = () =>
+          client.post(`/session/${sessionId}/message`, body, { directory: scoped });
+        const response = noReply === true
+          ? await post()
+          : await manager.withSessionTurn({ sessionId, directory: scoped }, post);
 
         if (noReply === true) {
+          const analysis = analyzeTypedMessage(response);
           const formatted = formatMessageResponse(response);
           const ack =
             "noReply context injection acknowledged; this is not a generated-task result.";
+          if (analysis.hasError) {
+            return toolResult(
+              `${ack}\n\n${analysis.warning ?? formatted}`,
+              true,
+            );
+          }
           return toolResult(formatted ? `${ack}\n\n${formatted}` : ack);
         }
 
-        const analysis = analyzeMessageResponse(response);
+        const analysis = analyzeTypedMessage(response);
         const formatted = formatMessageResponse(response);
         const parts: string[] = [];
         if (formatted) parts.push(formatted);
@@ -207,7 +198,10 @@ export function registerMessageTools(
           parts.push(`\n--- WARNING ---\n${analysis.warning}`);
         }
         return toolResult(
-          parts.join("\n\n") || "Empty response.",
+          parts.join("\n\n") ||
+            (analysis.hasNonTextContent
+              ? "Completed with non-text output; this is not an authentication failure."
+              : "Empty response."),
           analysis.hasError,
         );
       } catch (e) {
@@ -234,7 +228,7 @@ export function registerMessageTools(
       agent: z.string().optional().describe("Agent to use"),
       directory: directoryParam,
     },
-    async ({ sessionId, text, providerID, modelID, variant, agent, directory }) => {
+    async ({ sessionId, text, providerID, modelID, variant, agent, directory }, extra) => {
       try {
         resolveToolModel(providerID, modelID);
         const scoped = validateDirectory(directory);
@@ -247,8 +241,9 @@ export function registerMessageTools(
           agent,
           directory: scoped,
           deadlineAt: createDeadline(ASYNC_SUBMIT_BUDGET_MS),
+          signal: extra?.signal,
         });
-        return toolResult(formatAsyncHandle(handle));
+        return toolResult(formatAsyncHandle(handle), fireToolIsError(handle));
       } catch (e) {
         return toolError(e);
       }
@@ -297,10 +292,10 @@ export function registerMessageTools(
           variant,
           agent,
         });
-        const result = await client.post(
-          `/session/${sessionId}/command`,
-          body,
-          { directory: scoped },
+        const result = await getSharedTaskManager(client).withSessionTurn(
+          { sessionId, directory: scoped },
+          () =>
+            client.post(`/session/${sessionId}/command`, body, { directory: scoped }),
         );
         return toolResult(formatMessageResponse(result));
       } catch (e) {
@@ -330,10 +325,10 @@ export function registerMessageTools(
           sessionId,
           directory,
         );
-        const result = await client.post(
-          `/session/${sessionId}/shell`,
-          body,
-          { directory: scoped },
+        const result = await getSharedTaskManager(client).withSessionTurn(
+          { sessionId, directory: scoped },
+          () =>
+            client.post(`/session/${sessionId}/shell`, body, { directory: scoped }),
         );
         return toolResult(formatMessageResponse(result));
       } catch (e) {
