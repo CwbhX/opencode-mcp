@@ -9,6 +9,7 @@
 import { z } from "zod";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { resolveModelSelection } from "./model-selection.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -66,16 +67,16 @@ export function applyModelDefaults(
   modelID?: string,
   variant?: string,
 ): { providerID: string; modelID: string; variant?: string } | undefined {
-  // Explicit params take priority
-  if (providerID && modelID) {
-    return { providerID, modelID, ...(variant ? { variant } : {}) };
-  }
-  // Fall back to env-var defaults
-  if (_defaultProviderID && _defaultModelID) {
-    return { providerID: _defaultProviderID, modelID: _defaultModelID, ...(variant ? { variant } : {}) };
-  }
-  // No defaults available — let the server decide
-  return undefined;
+  const selected = resolveModelSelection({
+    providerID,
+    modelID,
+    defaults: {
+      providerID: _defaultProviderID,
+      modelID: _defaultModelID,
+    },
+  });
+  if (!selected) return undefined;
+  return { ...selected, ...(variant ? { variant } : {}) };
 }
 
 // ── Directory Validation ─────────────────────────────────────────────
@@ -608,8 +609,8 @@ function diagnoseError(msg: string): string {
   } else if (lower.includes("not found") && lower.includes("session")) {
     tips.push("- List active sessions with `opencode_sessions_overview`");
   } else if (lower.includes("rate limit") || lower.includes("429")) {
-    tips.push("- Wait a moment and retry, or switch provider");
-    tips.push("- Try a free model: `opencode_ask` with providerID `opencode`, modelID `minimax-m2.1-free`");
+    tips.push("- Wait and retry the same selected model; do not silently switch to another model");
+    tips.push("- Check provider status with `opencode_setup`");
   } else if (lower.includes("econnrefused")) {
     tips.push("- The OpenCode server is not accepting connections");
     tips.push("- Is `opencode serve` running? Check with `opencode_setup`");
@@ -629,6 +630,7 @@ function diagnoseError(msg: string): string {
   } else if (lower.includes("directory not found") || lower.includes("not an absolute path")) {
     tips.push("- The `directory` parameter must be an absolute path to an existing directory");
     tips.push("- Example: `/home/user/my-project` (not `./my-project` or `~/my-project`)");
+    tips.push("- Relative paths, `~`, and file paths are rejected");
   }
 
   return tips.join("\n");

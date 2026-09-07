@@ -5,22 +5,215 @@
 
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { OpenCodeClient } from "../client.js";
+import { AmbiguousAcceptanceError, type TaskResult } from "../bridge-types.js";
+import { OpenCodeClient, OpenCodeError } from "../client.js";
 import {
   formatMessageResponse,
   formatMessageList,
-  formatSessionList,
   analyzeMessageResponse,
   isProviderConfigured,
   redactSecrets,
-  resolveSessionStatus,
-  applyModelDefaults,
   normalizeDirectory,
   toolResult,
   toolError,
   directoryParam,
   readOnly,
 } from "../helpers.js";
+import {
+  buildPromptBody,
+  parseAllowedModels,
+  resolveModelSelection,
+} from "../model-selection.js";
+import {
+  assertSessionDirectory,
+  createDeadline,
+  validateDirectory,
+  validateDurationSeconds,
+  validateIntervalMs,
+} from "../request-context.js";
+import {
+  checkToolIsError,
+  fireToolIsError,
+  formatTaskResult,
+  runToolIsError,
+  waitToolIsError,
+} from "../task-result-format.js";
+import { getSharedTaskManager, type TaskSelector } from "../task-manager.js";
+import { normalizeRawSessionState } from "../task-status.js";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function resolveWorkflowModel(providerID?: string, modelID?: string) {
+  return resolveModelSelection({
+    providerID,
+    modelID,
+    defaults: {
+      providerID: process.env.OPENCODE_DEFAULT_PROVIDER,
+      modelID: process.env.OPENCODE_DEFAULT_MODEL,
+    },
+    requireExplicit: process.env.OPENCODE_REQUIRE_EXPLICIT_MODEL === "true",
+    allowedModels: parseAllowedModels(process.env.OPENCODE_ALLOWED_MODELS),
+  });
+}
+
+function sessionDirectoryOf(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined;
+  return typeof payload.directory === "string" ? payload.directory : undefined;
+}
+
+function taskSelector(input: {
+  jobId?: string;
+  sessionId?: string;
+  requestMessageID?: string;
+  directory?: string;
+}): TaskSelector {
+  if (!input.jobId && !input.sessionId) {
+    throw new Error("Provide jobId or sessionId.");
+  }
+  if (input.jobId) {
+    const selector: { jobId: string; sessionId?: string; requestMessageID?: string; directory?: string } = {
+      jobId: input.jobId,
+    };
+    if (input.sessionId) selector.sessionId = input.sessionId;
+    if (input.requestMessageID) selector.requestMessageID = input.requestMessageID;
+    if (input.directory) selector.directory = input.directory;
+    return selector;
+  }
+  if (input.requestMessageID) {
+    return {
+      sessionId: input.sessionId!,
+      requestMessageID: input.requestMessageID,
+      ...(input.directory ? { directory: input.directory } : {}),
+    };
+  }
+  return {
+    sessionId: input.sessionId!,
+    ...(input.directory ? { directory: input.directory } : {}),
+  };
+}
+
+function providerEntries(raw: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(raw)) return raw as Array<Record<string, unknown>>;
+  if (isRecord(raw) && Array.isArray(raw.all)) {
+    return raw.all as Array<Record<string, unknown>>;
+  }
+  if (isRecord(raw) && Array.isArray(raw.providers)) {
+    return raw.providers as Array<Record<string, unknown>>;
+  }
+  return [];
+}
+
+function defaultModelForProvider(
+  raw: unknown,
+  providerId: string,
+): string | undefined {
+  if (isRecord(raw) && isRecord(raw.default)) {
+    const mapped = raw.default[providerId];
+    if (typeof mapped === "string" && mapped.length > 0) return mapped;
+  }
+  const provider = providerEntries(raw).find(
+    (entry) => entry.id === providerId || entry.name === providerId,
+  );
+  if (!provider) return undefined;
+  for (const key of ["default", "defaultModel", "defaultModelID"] as const) {
+    const value = provider[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  const models = provider.models;
+  if (isRecord(models) && !Array.isArray(models)) {
+    for (const [id, spec] of Object.entries(models)) {
+      if (isRecord(spec) && spec.default === true && id) return id;
+    }
+  }
+  if (Array.isArray(models)) {
+    for (const spec of models) {
+      if (isRecord(spec) && spec.default === true && typeof spec.id === "string") {
+        return spec.id;
+      }
+    }
+  }
+  return undefined;
+}
+
+function observedModelFromMessage(
+  response: unknown,
+): { providerID: string; modelID: string } | null {
+  if (!isRecord(response)) return null;
+  const info = isRecord(response.info) ? response.info : response;
+  const providerID = info.providerID;
+  const modelID = info.modelID;
+  if (typeof providerID === "string" && typeof modelID === "string") {
+    return { providerID, modelID };
+  }
+  return null;
+}
+
+function isAmbiguousOrTimeout(error: unknown): boolean {
+  if (error instanceof AmbiguousAcceptanceError) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /timeout|timed out|aborted/i.test(message);
+}
+
+function isKnownClientReject(error: unknown): boolean {
+  return error instanceof OpenCodeError && error.status >= 400 && error.status < 500;
+}
+
+function summarizeTask(result: TaskResult, kind: "fire" | "run" | "wait"): string {
+  const session = result.sessionId ?? "(unknown session)";
+  const lines: string[] = [];
+  if (kind === "fire") {
+    if (result.submissionState === "accepted") {
+      lines.push(`Task dispatched to session: ${session}`);
+      lines.push(`Job: ${result.jobId}`);
+      lines.push("");
+      lines.push("OpenCode is now working autonomously. Use these tools to monitor:");
+      lines.push(`- \`opencode_check({ jobId: "${result.jobId}" })\` — quick progress check`);
+      lines.push(`- \`opencode_wait({ jobId: "${result.jobId}" })\` — block until done`);
+      if (result.sessionId) {
+        lines.push(`- \`opencode_session_todo({id: "${result.sessionId}"})\` — see the agent's task list`);
+        lines.push(`- \`opencode_review_changes({sessionId: "${result.sessionId}"})\` — see file changes after completion`);
+      }
+    } else {
+      lines.push(`Task submission ${result.submissionState} for session: ${session}`);
+      lines.push(`Job: ${result.jobId}`);
+      if (result.safeToResubmit === false) {
+        lines.push("safeToResubmit: false — do not resend this prompt automatically.");
+      }
+    }
+  } else {
+    if (result.directory) lines.push(`Directory: ${result.directory}`);
+    lines.push(`Session: ${session}`);
+    if (result.jobId) lines.push(`Job: ${result.jobId}`);
+    lines.push(
+      `Status: ${result.state}${result.waitOutcome ? ` (${result.waitOutcome})` : ""}`,
+    );
+    if (result.tracking === "untracked") {
+      lines.push("Tracking: untracked. Do not claim this particular task succeeded.");
+    }
+    if (result.content) {
+      lines.push("", result.content);
+    }
+    if (result.pendingRequests.length > 0) {
+      lines.push("", "Pending requests:");
+      for (const pending of result.pendingRequests) {
+        lines.push(`- ${pending.kind} ${pending.requestId}: ${pending.summary}`);
+      }
+    }
+    if (result.waitOutcome === "timed_out") {
+      lines.push("Timed out. Check this job; do not submit it again.");
+    }
+  }
+  if (result.nextAction) {
+    lines.push("", result.nextAction);
+  }
+  return lines.join("\n");
+}
+
+function toolFromTask(summary: string, result: TaskResult, isError: boolean) {
+  return toolResult(formatTaskResult(summary, result), isError);
+}
 
 export function registerWorkflowTools(
   server: McpServer,
@@ -251,20 +444,21 @@ export function registerWorkflowTools(
     },
     async ({ prompt, title, providerID, modelID, variant, agent, system, directory }) => {
       try {
+        const model = resolveWorkflowModel(providerID, modelID);
+
         // 1. Create session
         const session = (await client.post("/session", {
           title: title ?? prompt.slice(0, 80),
         }, { directory })) as Record<string, unknown>;
         const sessionId = session.id as string;
 
-        // 2. Send prompt
-        const body: Record<string, unknown> = {
-          parts: [{ type: "text", text: prompt }],
-        };
-        const model = applyModelDefaults(providerID, modelID, variant);
-        if (model) body.model = model;
-        if (agent) body.agent = agent;
-        if (system) body.system = system;
+        const body = buildPromptBody({
+          prompt,
+          model,
+          variant,
+          agent,
+          system,
+        });
 
         const response = await client.post(
           `/session/${sessionId}/message`,
@@ -305,12 +499,25 @@ export function registerWorkflowTools(
     },
     async ({ sessionId, prompt, providerID, modelID, variant, agent, directory }) => {
       try {
-        const body: Record<string, unknown> = {
-          parts: [{ type: "text", text: prompt }],
-        };
-        const model = applyModelDefaults(providerID, modelID, variant);
-        if (model) body.model = model;
-        if (agent) body.agent = agent;
+        const model = resolveWorkflowModel(providerID, modelID);
+        if (directory) {
+          const session = await client.get(
+            `/session/${sessionId}`,
+            undefined,
+            directory,
+          );
+          assertSessionDirectory({
+            requestedDirectory: directory,
+            sessionDirectory: sessionDirectoryOf(session),
+          });
+        }
+
+        const body = buildPromptBody({
+          prompt,
+          model,
+          variant,
+          agent,
+        });
 
         const response = await client.post(
           `/session/${sessionId}/message`,
@@ -394,7 +601,7 @@ export function registerWorkflowTools(
         const lines = sessions.map((s) => {
           const id = s.id ?? "?";
           const title = s.title ?? "(untitled)";
-          const status = resolveSessionStatus(statuses[id as string]);
+          const status = normalizeRawSessionState(statuses, String(id));
           const parentTag = s.parentID ? ` (child of ${s.parentID})` : "";
           return `- [${status}] ${title} [${id}]${parentTag}`;
         });
@@ -496,60 +703,40 @@ export function registerWorkflowTools(
   // ─── Wait for async session to complete ───────────────────────────
   server.tool(
     "opencode_wait",
-    "Poll a session until it finishes processing. Use after opencode_message_send_async to wait for the AI to complete its response. Sends progress notifications while waiting. If timeout is reached, returns a progress report (not an error). For long tasks, consider using opencode_session_todo to check progress instead of blocking.",
+    "Wait until a tracked job or session turn reaches a terminal, blocked, or timed-out state. Idle session status alone is not completion. Prefer jobId from opencode_fire / opencode_run.",
     {
-      sessionId: z.string().describe("Session ID to wait on"),
+      sessionId: z.string().optional().describe("Session ID to wait on"),
+      jobId: z.string().optional().describe("Bridge job ID returned by opencode_fire or opencode_run"),
+      requestMessageID: z
+        .string()
+        .optional()
+        .describe("User message ID to correlate when jobId is not available"),
       timeoutSeconds: z
         .number()
         .optional()
-        .describe("Max seconds to wait (default: 120). Set higher (300-600) for complex tasks."),
+        .describe("Max seconds to wait (default: 120, max: 3600)."),
       pollIntervalMs: z
         .number()
         .optional()
-        .describe("Polling interval in ms (default: 2000)"),
+        .describe("Polling interval in ms (default: 250)"),
       directory: directoryParam,
     },
-    async ({ sessionId, timeoutSeconds, pollIntervalMs, directory }) => {
+    async ({ sessionId, jobId, requestMessageID, timeoutSeconds, pollIntervalMs, directory }) => {
       try {
-        const timeout = (timeoutSeconds ?? 120) * 1000;
-        const interval = pollIntervalMs ?? 2000;
-        const start = Date.now();
-
-        while (Date.now() - start < timeout) {
-          const statuses = (await client.get("/session/status", undefined, directory)) as Record<
-            string,
-            unknown
-          >;
-          const status = resolveSessionStatus(statuses[sessionId]);
-
-          if (status === "idle" || status === "completed") {
-            // Fetch latest messages
-            const messages = await client.get(
-              `/session/${sessionId}/message`,
-              { limit: "1" },
-              directory,
-            );
-            const arr = messages as unknown[];
-            if (arr.length > 0) {
-              return toolResult(
-                `Session completed.\n\n${formatMessageResponse(arr[arr.length - 1])}`,
-              );
-            }
-            return toolResult("Session completed (no messages).");
-          }
-
-          if (status === "error") {
-            return toolResult(`Session ended with error status.`, true);
-          }
-
-          await new Promise((r) => setTimeout(r, interval));
-        }
-
-        return toolResult(
-          `Timeout: session still processing after ${timeoutSeconds ?? 120}s. ` +
-          `Use \`opencode_conversation\` to check progress, or \`opencode_session_abort\` to stop it.`,
-          true,
+        const deadlineAt = createDeadline(
+          validateDurationSeconds(timeoutSeconds, 120, 3600) * 1000,
         );
+        const selector = taskSelector({ jobId, sessionId, requestMessageID, directory });
+        const interval =
+          pollIntervalMs !== undefined
+            ? validateIntervalMs(pollIntervalMs, 250, 60_000)
+            : undefined;
+        const manager = getSharedTaskManager(client);
+        const result = await manager.wait(selector, {
+          deadlineAt,
+          ...(interval !== undefined ? { pollIntervalMs: interval } : {}),
+        });
+        return toolFromTask(summarizeTask(result, "wait"), result, waitToolIsError(result));
       } catch (e) {
         return toolError(e);
       }
@@ -595,22 +782,34 @@ export function registerWorkflowTools(
     async ({ providerId, modelID, variant, directory }) => {
       let sessionId: string | null = null;
       try {
-        // 1. Create a temporary test session
+        let model = modelID
+          ? resolveWorkflowModel(providerId, modelID)
+          : undefined;
+        if (!model) {
+          const providers = await client.get("/provider", undefined, directory);
+          const resolvedModelID = defaultModelForProvider(providers, providerId);
+          if (!resolvedModelID) {
+            return toolError(
+              new Error(
+                `Could not resolve a default model for provider "${providerId}". ` +
+                  "Pass modelID for that provider, or configure the provider's default. " +
+                  "Another provider's default will not be used.",
+              ),
+            );
+          }
+          model = { providerID: providerId, modelID: resolvedModelID };
+        }
+
         const session = (await client.post("/session", {
           title: `[test] ${providerId}`,
         }, { directory })) as Record<string, unknown>;
         sessionId = session.id as string;
 
-        // 2. Send a trivial prompt
-        const body: Record<string, unknown> = {
-          parts: [{ type: "text", text: "Say hello in one word." }],
-        };
-        // Use the specified model, or let the provider pick its default
-        if (modelID) {
-          body.model = { providerID: providerId, modelID, ...(variant ? { variant } : {}) };
-        } else {
-          body.providerID = providerId;
-        }
+        const body = buildPromptBody({
+          prompt: "Say hello in one word.",
+          model,
+          variant,
+        });
 
         const response = await client.post(
           `/session/${sessionId}/message`,
@@ -618,17 +817,25 @@ export function registerWorkflowTools(
           { directory },
         );
 
-        // 3. Analyze the response
         const analysis = analyzeMessageResponse(response);
         const formatted = formatMessageResponse(response);
+        const observed = observedModelFromMessage(response);
+        const mismatch =
+          !observed ||
+          observed.providerID !== model.providerID ||
+          observed.modelID !== model.modelID;
 
-        // 4. Cleanup — delete test session
         try {
           await client.delete(`/session/${sessionId}`, undefined, directory);
-        } catch { /* best-effort cleanup */ }
+        } catch { /* best-effort cleanup after a known terminal outcome */ }
 
-        if (analysis.hasError || analysis.isEmpty) {
-          const reason = analysis.warning ?? "Unknown error — no response received.";
+        if (analysis.hasError || analysis.isEmpty || mismatch) {
+          const reason = mismatch
+            ? `MODEL MISMATCH: expected ${model.providerID}/${model.modelID}` +
+              (observed
+                ? `, observed ${observed.providerID}/${observed.modelID}.`
+                : ", but the response did not include providerID/modelID.")
+            : (analysis.warning ?? "Unknown error — no response received.");
           return toolResult(
             `Provider "${providerId}" FAILED.\n\n${reason}`,
             true,
@@ -640,13 +847,19 @@ export function registerWorkflowTools(
           `Provider "${providerId}" is working.\n\nResponse: ${preview}`,
         );
       } catch (e) {
-        // Cleanup on error
-        if (sessionId) {
+        if (sessionId && isKnownClientReject(e)) {
           try {
             await client.delete(`/session/${sessionId}`, undefined, directory);
           } catch { /* best-effort cleanup */ }
         }
-        return toolError(e);
+        const err = toolError(e);
+        if (sessionId && (isAmbiguousOrTimeout(e) || !isKnownClientReject(e))) {
+          return toolResult(
+            `${err.content[0].text}\n\nSession ${sessionId} was kept for diagnosis.`,
+            true,
+          );
+        }
+        return err;
       }
     },
   );
@@ -674,95 +887,30 @@ export function registerWorkflowTools(
     },
     async ({ prompt, sessionId, title, providerID, modelID, variant, agent, maxDurationSeconds, directory }) => {
       try {
-        // 1. Create or reuse session
-        let sid = sessionId;
-        if (!sid) {
-          const session = (await client.post("/session", {
-            title: title ?? prompt.slice(0, 80),
-          }, { directory })) as Record<string, unknown>;
-          sid = session.id as string;
-        }
-
-        // 2. Send async (fire-and-forget)
-        const body: Record<string, unknown> = {
-          parts: [{ type: "text", text: prompt }],
-          noReply: false,
-        };
-        const model = applyModelDefaults(providerID, modelID, variant);
-        if (model) body.model = model;
-        if (agent) body.agent = agent;
-
-        await client.post(`/session/${sid}/message`, body, { directory });
-
-        // Session-directory consistency note
-        const dirNote = sessionId && directory
-          ? `\n_Note: Using session ${sid} in directory ${directory}. Ensure this session belongs to this project._`
-          : "";
-
-        // 3. Poll until done
-        const timeout = (maxDurationSeconds ?? 600) * 1000;
-        const interval = 3000;
-        const start = Date.now();
-        const dirLabel = directory ? `Directory: ${directory}\n` : "";
-
-        while (Date.now() - start < timeout) {
-          await new Promise((r) => setTimeout(r, interval));
-
-          const statuses = (await client.get("/session/status", undefined, directory)) as Record<string, unknown>;
-          const status = resolveSessionStatus(statuses[sid!]);
-
-          if (status === "idle" || status === "completed") {
-            // Get final response
-            const messages = await client.get(
-              `/session/${sid}/message`,
-              { limit: "1" },
-              directory,
-            );
-            const arr = messages as unknown[];
-            const lastMsg = arr.length > 0 ? formatMessageResponse(arr[arr.length - 1]) : "";
-
-            // Get todo summary
-            let todoSummary = "";
-            try {
-              const todos = await client.get(`/session/${sid}/todo`, undefined, directory);
-              if (Array.isArray(todos) && todos.length > 0) {
-                const completed = todos.filter((t: any) => t.status === "completed").length;
-                todoSummary = `\nTasks: ${completed}/${todos.length} completed`;
-              }
-            } catch { /* non-critical */ }
-
-            return toolResult(
-              `${dirLabel}Session: ${sid}\nStatus: completed${todoSummary}${dirNote}\n\n${lastMsg || "(no response text)"}`,
-            );
-          }
-
-          if (status === "error") {
-            return toolResult(
-              `${dirLabel}Session: ${sid}\nStatus: error${dirNote}\n\nThe session ended with an error. Use \`opencode_conversation({sessionId: "${sid}"})\` to see what happened.`,
-              true,
-            );
-          }
-        }
-
-        // Timeout — return progress report
-        let todoProgress = "";
-        try {
-          const todos = await client.get(`/session/${sid}/todo`, undefined, directory);
-          if (Array.isArray(todos) && todos.length > 0) {
-            const completed = todos.filter((t: any) => t.status === "completed").length;
-            const inProgress = todos.filter((t: any) => t.status === "in_progress").length;
-            todoProgress = `\nTasks: ${completed}/${todos.length} completed, ${inProgress} in progress`;
-          }
-        } catch { /* non-critical */ }
-
-        return toolResult(
-          `${dirLabel}Session: ${sid}\nStatus: still running after ${maxDurationSeconds ?? 600}s${todoProgress}${dirNote}\n\n` +
-          `The session is still working. Options:\n` +
-          `- \`opencode_check({sessionId: "${sid}"})\` — quick progress check\n` +
-          `- \`opencode_wait({sessionId: "${sid}", timeoutSeconds: 300})\` — wait longer\n` +
-          `- \`opencode_session_abort({id: "${sid}"})\` — stop the session`,
-          true,
+        const deadlineAt = createDeadline(
+          validateDurationSeconds(maxDurationSeconds, 600, 3600) * 1000,
         );
+        const manager = getSharedTaskManager(client);
+        const submitted = await manager.submitAsync({
+          prompt,
+          sessionId,
+          title: title ?? (sessionId ? undefined : prompt.slice(0, 80)),
+          providerID,
+          modelID,
+          variant,
+          agent,
+          directory,
+          deadlineAt,
+        });
+        if (submitted.submissionState !== "accepted" || submitted.terminal === true) {
+          return toolFromTask(
+            summarizeTask(submitted, "run"),
+            submitted,
+            runToolIsError(submitted),
+          );
+        }
+        const waited = await manager.wait({ jobId: submitted.jobId }, { deadlineAt });
+        return toolFromTask(summarizeTask(waited, "run"), waited, runToolIsError(waited));
       } catch (e) {
         return toolError(e);
       }
@@ -788,35 +936,22 @@ export function registerWorkflowTools(
     },
     async ({ prompt, sessionId, title, providerID, modelID, variant, agent, directory }) => {
       try {
-        // 1. Create or reuse session
-        let sid = sessionId;
-        if (!sid) {
-          const session = (await client.post("/session", {
-            title: title ?? prompt.slice(0, 80),
-          }, { directory })) as Record<string, unknown>;
-          sid = session.id as string;
-        }
-
-        // 2. Send async
-        const body: Record<string, unknown> = {
-          parts: [{ type: "text", text: prompt }],
-          noReply: false,
-        };
-        const model = applyModelDefaults(providerID, modelID, variant);
-        if (model) body.model = model;
-        if (agent) body.agent = agent;
-
-        await client.post(`/session/${sid}/message`, body, { directory });
-
-        const dirLabel = directory ? `Directory: ${directory}\n` : "";
-        return toolResult(
-          `${dirLabel}Task dispatched to session: ${sid}\n\n` +
-          `OpenCode is now working autonomously. Use these tools to monitor:\n` +
-          `- \`opencode_check({sessionId: "${sid}"})\` — quick progress check\n` +
-          `- \`opencode_session_todo({id: "${sid}"})\` — see the agent's task list\n` +
-          `- \`opencode_wait({sessionId: "${sid}"})\` — block until done\n` +
-          `- \`opencode_review_changes({sessionId: "${sid}"})\` — see file changes after completion`,
+        const deadlineAt = createDeadline(
+          validateDurationSeconds(undefined, 30, 120) * 1000,
         );
+        const manager = getSharedTaskManager(client);
+        const result = await manager.submitAsync({
+          prompt,
+          sessionId,
+          title: title ?? (sessionId ? undefined : prompt.slice(0, 80)),
+          providerID,
+          modelID,
+          variant,
+          agent,
+          directory,
+          deadlineAt,
+        });
+        return toolFromTask(summarizeTask(result, "fire"), result, fireToolIsError(result));
       } catch (e) {
         return toolError(e);
       }
@@ -826,9 +961,14 @@ export function registerWorkflowTools(
   // ─── Check: cheap progress report for a session ────────────────────
   server.tool(
     "opencode_check",
-    "Get a compact cached progress report for a session. Much cheaper than opencode_conversation or opencode_wait — returns status, todos, and file counts in a single call. Use this to monitor sessions launched with opencode_fire.",
+    "Get a compact progress report for a job or session. Prefer jobId from opencode_fire / opencode_run. Session-only checks are untracked — idle is not Done.",
     {
-      sessionId: z.string().describe("Session ID to check"),
+      sessionId: z.string().optional().describe("Session ID to check"),
+      jobId: z.string().optional().describe("Bridge job ID returned by opencode_fire or opencode_run"),
+      requestMessageID: z
+        .string()
+        .optional()
+        .describe("User message ID to correlate when jobId is not available"),
       detailed: z
         .boolean()
         .optional()
@@ -836,79 +976,102 @@ export function registerWorkflowTools(
       directory: directoryParam,
     },
     readOnly,
-    async ({ sessionId, detailed, directory }) => {
+    async ({ sessionId, jobId, requestMessageID, detailed, directory }) => {
       try {
-        // Validate directory early — before .catch(() => null) swallows the error
-        directory = normalizeDirectory(directory) as typeof directory;
+        const dir = validateDirectory(directory);
+        const selector = taskSelector({
+          jobId,
+          sessionId,
+          requestMessageID,
+          directory: dir,
+        });
+        const manager = getSharedTaskManager(client);
+        const result = await manager.check(selector);
+        const sid = result.sessionId ?? sessionId;
 
-        // Parallel fetch: status, todos, session info, optionally last message
-        const promises: Promise<unknown>[] = [
-          client.get("/session/status", undefined, directory),
-          client.get(`/session/${sessionId}/todo`, undefined, directory).catch(() => null),
-          client.get(`/session/${sessionId}`, undefined, directory).catch(() => null),
-        ];
-        if (detailed) {
-          promises.push(
-            client.get(`/session/${sessionId}/message`, { limit: "1" }, directory).catch(() => null),
-          );
-        }
-
-        const [statuses, todos, sessionInfo, lastMessages] = await Promise.all(promises) as [
-          Record<string, unknown>,
-          Array<Record<string, unknown>> | null,
-          Record<string, unknown> | null,
-          unknown[] | null,
-        ];
-
-        const status = resolveSessionStatus(statuses[sessionId]);
         const lines: string[] = [];
+        let title = "(untitled)";
+        if (sid) {
+          try {
+            const sessionInfo = (await client.get(
+              `/session/${sid}`,
+              undefined,
+              dir,
+            )) as Record<string, unknown> | null;
+            if (sessionInfo && typeof sessionInfo.title === "string") {
+              title = sessionInfo.title;
+            }
+          } catch { /* optional enrichment */ }
+          lines.push(`## ${title} [${sid}]`);
+        } else {
+          lines.push(`## Job ${result.jobId}`);
+        }
+        lines.push(
+          `Status: **${result.state}** (raw: ${result.rawSessionState ?? "n/a"}, tracking: ${result.tracking})`,
+        );
+        lines.push(`Job: ${result.jobId}`);
+        if (result.tracking === "untracked") {
+          lines.push("Tracking is untracked. Do not claim this particular task succeeded.");
+        }
 
-        // Session title
-        const title = sessionInfo?.title ?? "(untitled)";
-        lines.push(`## ${title} [${sessionId}]`);
-        lines.push(`Status: **${status}**`);
+        if (sid) {
+          try {
+            const todos = (await client.get(
+              `/session/${sid}/todo`,
+              undefined,
+              dir,
+            )) as Array<Record<string, unknown>> | null;
+            if (Array.isArray(todos) && todos.length > 0) {
+              const completed = todos.filter((t) => t.status === "completed").length;
+              const inProgress = todos.filter((t) => t.status === "in_progress").length;
+              const pending = todos.length - completed - inProgress;
+              lines.push(`Tasks: ${completed}/${todos.length} completed` +
+                (inProgress > 0 ? `, ${inProgress} in progress` : "") +
+                (pending > 0 ? `, ${pending} pending` : ""));
+              const current = todos.find((t) => t.status === "in_progress");
+              if (current) {
+                lines.push(`Current: ${current.content ?? current.title ?? "(unknown)"}`);
+              }
+            }
+          } catch { /* optional */ }
 
-        // Todos
-        if (Array.isArray(todos) && todos.length > 0) {
-          const completed = todos.filter((t) => t.status === "completed").length;
-          const inProgress = todos.filter((t) => t.status === "in_progress").length;
-          const pending = todos.length - completed - inProgress;
-          lines.push(`Tasks: ${completed}/${todos.length} completed` +
-            (inProgress > 0 ? `, ${inProgress} in progress` : "") +
-            (pending > 0 ? `, ${pending} pending` : ""));
+          try {
+            const diffs = await client.get(`/session/${sid}/diff`, undefined, dir) as unknown[];
+            if (Array.isArray(diffs) && diffs.length > 0) {
+              lines.push(`Files changed: ${diffs.length}`);
+            }
+          } catch { /* optional */ }
 
-          // Show current task
-          const current = todos.find((t) => t.status === "in_progress");
-          if (current) {
-            lines.push(`Current: ${current.content ?? current.title ?? "(unknown)"}`);
+          if (detailed) {
+            if (result.content) {
+              const truncated = result.content.length > 500
+                ? result.content.slice(0, 497) + "..."
+                : result.content;
+              lines.push(`\n### Last message\n${truncated}`);
+            } else {
+              try {
+                const lastMessages = await client.get(
+                  `/session/${sid}/message`,
+                  { limit: "1" },
+                  dir,
+                );
+                if (Array.isArray(lastMessages) && lastMessages.length > 0) {
+                  const lastMsg = formatMessageResponse(lastMessages[lastMessages.length - 1]);
+                  if (lastMsg) {
+                    const truncated = lastMsg.length > 500 ? lastMsg.slice(0, 497) + "..." : lastMsg;
+                    lines.push(`\n### Last message\n${truncated}`);
+                  }
+                }
+              } catch { /* optional */ }
+            }
           }
         }
 
-        // File changes count (from diff endpoint)
-        try {
-          const diffs = await client.get(`/session/${sessionId}/diff`, undefined, directory) as unknown[];
-          if (Array.isArray(diffs) && diffs.length > 0) {
-            lines.push(`Files changed: ${diffs.length}`);
-          }
-        } catch { /* non-critical */ }
-
-        // Last message (if detailed)
-        if (detailed && Array.isArray(lastMessages) && lastMessages.length > 0) {
-          const lastMsg = formatMessageResponse(lastMessages[lastMessages.length - 1]);
-          if (lastMsg) {
-            const truncated = lastMsg.length > 500 ? lastMsg.slice(0, 497) + "..." : lastMsg;
-            lines.push(`\n### Last message\n${truncated}`);
-          }
+        if (result.nextAction) {
+          lines.push("", result.nextAction);
         }
 
-        // Suggest next action based on status
-        if (status === "idle" || status === "completed") {
-          lines.push(`\nDone! Use \`opencode_review_changes({sessionId: "${sessionId}"})\` to see all changes.`);
-        } else if (status === "error") {
-          lines.push(`\nFailed. Use \`opencode_conversation({sessionId: "${sessionId}"})\` to see what went wrong.`);
-        }
-
-        return toolResult(lines.join("\n"));
+        return toolFromTask(lines.join("\n"), result, checkToolIsError(result));
       } catch (e) {
         return toolError(e);
       }

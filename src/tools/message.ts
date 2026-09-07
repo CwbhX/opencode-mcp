@@ -7,9 +7,80 @@ import {
   formatMessageResponse,
   analyzeMessageResponse,
   formatMessageList,
-  applyModelDefaults,
   directoryParam,
 } from "../helpers.js";
+import {
+  buildCommandBody,
+  buildPromptBody,
+  buildShellBody,
+  parseAllowedModels,
+  resolveModelSelection,
+} from "../model-selection.js";
+import {
+  assertSessionDirectory,
+  createDeadline,
+  validateDirectory,
+} from "../request-context.js";
+import { getSharedTaskManager } from "../task-manager.js";
+
+const ASYNC_SUBMIT_BUDGET_MS = 60_000;
+
+function resolveToolModel(providerID?: string, modelID?: string) {
+  return resolveModelSelection({
+    providerID,
+    modelID,
+    defaults: {
+      providerID: process.env.OPENCODE_DEFAULT_PROVIDER,
+      modelID: process.env.OPENCODE_DEFAULT_MODEL,
+    },
+    requireExplicit: process.env.OPENCODE_REQUIRE_EXPLICIT_MODEL === "true",
+    allowedModels: parseAllowedModels(process.env.OPENCODE_ALLOWED_MODELS),
+  });
+}
+
+function sessionDirectoryOf(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const directory = (payload as { directory?: unknown }).directory;
+  return typeof directory === "string" ? directory : undefined;
+}
+
+async function assertExistingSessionDirectory(
+  client: OpenCodeClient,
+  sessionId: string,
+  directory: string | undefined,
+): Promise<string | undefined> {
+  const requested = validateDirectory(directory);
+  if (!requested) return undefined;
+  const session = await client.get(`/session/${sessionId}`, undefined, requested);
+  assertSessionDirectory({
+    requestedDirectory: requested,
+    sessionDirectory: sessionDirectoryOf(session),
+  });
+  return requested;
+}
+
+function formatAsyncHandle(result: {
+  jobId: string;
+  sessionId?: string;
+  requestMessageID?: string;
+  directory?: string;
+  state: string;
+  submissionState: string;
+}): string {
+  const handle = {
+    jobId: result.jobId,
+    sessionId: result.sessionId,
+    requestMessageID: result.requestMessageID,
+    directory: result.directory,
+    state: result.state,
+    submissionState: result.submissionState,
+  };
+  const line =
+    result.submissionState === "accepted"
+      ? "Message accepted asynchronously. Use opencode_wait or opencode_check to monitor this job."
+      : `Message was not accepted (submissionState=${result.submissionState}). Inspect the handle before retrying.`;
+  return `${line}\n\n${JSON.stringify(handle, null, 2)}`;
+}
 
 export function registerMessageTools(
   server: McpServer,
@@ -101,19 +172,32 @@ export function registerMessageTools(
       directory,
     }) => {
       try {
-        const body: Record<string, unknown> = {
-          parts: [{ type: "text", text }],
-        };
-        const model = applyModelDefaults(providerID, modelID, variant);
-        if (model) body.model = model;
-        if (agent) body.agent = agent;
-        if (noReply !== undefined) body.noReply = noReply;
-        if (system) body.system = system;
+        const model = resolveToolModel(providerID, modelID);
+        const scoped = await assertExistingSessionDirectory(
+          client,
+          sessionId,
+          directory,
+        );
+        const body = buildPromptBody({
+          prompt: text,
+          model,
+          variant,
+          agent,
+          system,
+          noReply,
+        });
         const response = await client.post(
           `/session/${sessionId}/message`,
           body,
-          { directory },
+          { directory: scoped },
         );
+
+        if (noReply === true) {
+          const formatted = formatMessageResponse(response);
+          const ack =
+            "noReply context injection acknowledged; this is not a generated-task result.";
+          return toolResult(formatted ? `${ack}\n\n${formatted}` : ack);
+        }
 
         const analysis = analyzeMessageResponse(response);
         const formatted = formatMessageResponse(response);
@@ -152,16 +236,19 @@ export function registerMessageTools(
     },
     async ({ sessionId, text, providerID, modelID, variant, agent, directory }) => {
       try {
-        const body: Record<string, unknown> = {
-          parts: [{ type: "text", text }],
-        };
-        const model = applyModelDefaults(providerID, modelID, variant);
-        if (model) body.model = model;
-        if (agent) body.agent = agent;
-        await client.post(`/session/${sessionId}/prompt_async`, body, { directory });
-        return toolResult(
-          "Message sent asynchronously. Use opencode_wait or opencode_message_list to check for responses.",
-        );
+        resolveToolModel(providerID, modelID);
+        const scoped = validateDirectory(directory);
+        const handle = await getSharedTaskManager(client).submitAsync({
+          prompt: text,
+          sessionId,
+          providerID,
+          modelID,
+          variant,
+          agent,
+          directory: scoped,
+          deadlineAt: createDeadline(ASYNC_SUBMIT_BUDGET_MS),
+        });
+        return toolResult(formatAsyncHandle(handle));
       } catch (e) {
         return toolError(e);
       }
@@ -197,17 +284,23 @@ export function registerMessageTools(
       directory,
     }) => {
       try {
-        const body: Record<string, unknown> = {
+        const model = resolveToolModel(providerID, modelID);
+        const scoped = await assertExistingSessionDirectory(
+          client,
+          sessionId,
+          directory,
+        );
+        const body = buildCommandBody({
           command,
-          arguments: args ?? "",
-        };
-        if (agent) body.agent = agent;
-        const cmdModel = applyModelDefaults(providerID, modelID, variant);
-        if (cmdModel) body.model = cmdModel;
+          arguments: args,
+          model,
+          variant,
+          agent,
+        });
         const result = await client.post(
           `/session/${sessionId}/command`,
           body,
-          { directory },
+          { directory: scoped },
         );
         return toolResult(formatMessageResponse(result));
       } catch (e) {
@@ -230,13 +323,17 @@ export function registerMessageTools(
     },
     async ({ sessionId, command, agent, providerID, modelID, variant, directory }) => {
       try {
-        const body: Record<string, unknown> = { command, agent };
-        const shellModel = applyModelDefaults(providerID, modelID, variant);
-        if (shellModel) body.model = shellModel;
+        const model = resolveToolModel(providerID, modelID);
+        const body = buildShellBody({ command, agent, model, variant });
+        const scoped = await assertExistingSessionDirectory(
+          client,
+          sessionId,
+          directory,
+        );
         const result = await client.post(
           `/session/${sessionId}/shell`,
           body,
-          { directory },
+          { directory: scoped },
         );
         return toolResult(formatMessageResponse(result));
       } catch (e) {

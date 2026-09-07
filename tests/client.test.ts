@@ -17,42 +17,74 @@ vi.mock("../src/server-manager.js", () => ({
 /**
  * Mock `@opencode-ai/sdk` so every call to `createOpencodeClient` (both the
  * one in the `OpenCodeClient` constructor and the one issued by
- * `buildSdkClient` during reconnect) returns the same factory output. Tests
- * push call recorders onto a shared queue and can therefore observe the URL
- * that each rebuilt SDK client targets.
+ * `buildSdkClient` during reconnect) returns a fresh object. Tests that
+ * assert SDK-client identity after a URL rebind rely on this.
  */
-const sdkClientFactory = vi.hoisted(() => {
-  const factories: Array<(opts: { baseUrl: string }) => unknown> = [];
-  return {
-    factories,
-    create: (opts: { baseUrl: string }) => {
-      const factory = factories.shift() ?? (() => ({ _client: {} }));
-      return factory(opts);
-    },
-  };
-});
 vi.mock("@opencode-ai/sdk", () => ({
-  createOpencodeClient: sdkClientFactory.create,
+  createOpencodeClient: () => ({ _client: {} }),
   OpencodeClient: vi.fn(),
 }));
 
-import { OpenCodeClient, OpenCodeError } from "../src/client.js";
+import { OpenCodeClient, OpenCodeError, AmbiguousAcceptanceError } from "../src/client.js";
 import { normalizeDirectory } from "../src/helpers.js";
 
-/**
- * Client tests.
- *
- * Post-SDK-migration (PR #11), `OpenCodeClient.request()` dispatches through
- * `(this.api as any)._client` (the SDK's internal HTTP client), not the
- * global `fetch`. The legacy `fetch`-mocking HTTP-method suites do not
- * exercise the production code path anymore and have been marked
- * `describe.skip` below.
- *
- * They will be revived once the `HttpTransport` interface lands (roadmap
- * item C1) — at which point we can inject a `FetchTransport` in tests and
- * exercise the full request/retry/header pipeline without poking at SDK
- * internals.
- */
+function headerOf(init: RequestInit | undefined, name: string): string | null {
+  const headers = init?.headers;
+  if (!headers) return null;
+  if (headers instanceof Headers) return headers.get(name);
+  if (Array.isArray(headers)) {
+    const found = headers.find(([key]) => key.toLowerCase() === name.toLowerCase());
+    return found?.[1] ?? null;
+  }
+  const rec = headers as Record<string, string>;
+  const direct = rec[name] ?? rec[name.toLowerCase()];
+  if (direct) return direct;
+  const key = Object.keys(rec).find((k) => k.toLowerCase() === name.toLowerCase());
+  return key ? rec[key] : null;
+}
+
+function mockResponse(opts: {
+  status?: number;
+  body?: string;
+  headers?: Record<string, string>;
+  text?: () => Promise<string>;
+  json?: () => Promise<unknown>;
+}): Response {
+  const status = opts.status ?? 200;
+  const body = opts.body ?? "";
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(opts.headers),
+    text: opts.text ?? (async () => body),
+    json:
+      opts.json ??
+      (async () => {
+        if (!body) throw new Error("JSON.parse should not run on an empty body");
+        return JSON.parse(body);
+      }),
+    body: null,
+  } as unknown as Response;
+}
+
+function jsonOk(data: unknown, status = 200): Response {
+  return mockResponse({ status, body: JSON.stringify(data) });
+}
+
+function makeClient(
+  overrides?: ConstructorParameters<typeof OpenCodeClient>[0],
+): OpenCodeClient {
+  return new OpenCodeClient({
+    baseUrl: "http://localhost:4096",
+    retryDelayMs: 0,
+    ...overrides,
+  });
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 // ─── OpenCodeError ───────────────────────────────────────────────────────
 
@@ -166,6 +198,24 @@ describe("OpenCodeClient", () => {
           }),
       ).not.toThrow();
     });
+
+    it("sends Basic Authorization when password is set", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonOk({ ok: true }));
+      const client = makeClient({ password: "secret" });
+      await client.get("/health");
+      expect(headerOf(fetchMock.mock.calls[0][1] as RequestInit, "authorization")).toBe(
+        "Basic " + Buffer.from("opencode:secret").toString("base64"),
+      );
+    });
+
+    it("uses the provided username in the Basic header", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonOk({ ok: true }));
+      const client = makeClient({ username: "admin", password: "secret" });
+      await client.get("/health");
+      expect(headerOf(fetchMock.mock.calls[0][1] as RequestInit, "authorization")).toBe(
+        "Basic " + Buffer.from("admin:secret").toString("base64"),
+      );
+    });
   });
 });
 
@@ -206,41 +256,24 @@ describe("x-opencode-directory header", () => {
    * `directory` argument.
    */
   it("sends the raw normalized path (no URI encoding)", async () => {
-    const client = new OpenCodeClient({ baseUrl: "http://localhost:4096" });
-    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonOk({}));
 
-    // Stub the SDK's internal HTTP client. The production code reaches into
-    // `(this.api as any)._client` — we replace it so we can inspect what
-    // headers actually get sent without standing up a real server.
-    (client.api as unknown as { _client: unknown })._client = {
-      get: async (opts: { url: string; headers: Record<string, string> }) => {
-        calls.push({ url: opts.url, headers: opts.headers });
-        return { data: {}, error: undefined, response: { status: 200 } };
-      },
-    };
-
+    const client = makeClient();
     await client.get("/project/current", undefined, "/tmp");
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0].headers["x-opencode-directory"]).toBe("/tmp");
-    // Explicit guard against the regressed behaviour:
-    expect(calls[0].headers["x-opencode-directory"]).not.toContain("%2F");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const value = headerOf(fetchMock.mock.calls[0][1] as RequestInit, "x-opencode-directory");
+    expect(value).toBe("/tmp");
+    expect(value).not.toContain("%2F");
   });
 
   it("omits the header when no directory is provided", async () => {
-    const client = new OpenCodeClient({ baseUrl: "http://localhost:4096" });
-    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonOk({}));
 
-    (client.api as unknown as { _client: unknown })._client = {
-      get: async (opts: { url: string; headers: Record<string, string> }) => {
-        calls.push({ url: opts.url, headers: opts.headers });
-        return { data: {}, error: undefined, response: { status: 200 } };
-      },
-    };
-
+    const client = makeClient();
     await client.get("/project/current");
 
-    expect(calls[0].headers["x-opencode-directory"]).toBeUndefined();
+    expect(headerOf(fetchMock.mock.calls[0][1] as RequestInit, "x-opencode-directory")).toBeNull();
   });
 });
 
@@ -250,56 +283,33 @@ describe("reconnect path", () => {
   beforeEach(() => {
     isServerRunningMock.mockReset();
     ensureServerMock.mockReset();
-    sdkClientFactory.factories.length = 0;
   });
 
   /**
-   * Queue SDK-client factories such that every produced `_client` shares
-   * the same call-counter closure. The retry loop in `client.ts` runs
-   * `MAX_RETRIES + 1` = 3 attempts before falling through to the reconnect
-   * branch; tests exercising reconnect need at least 3 failures + 1 success.
-   *
-   * Each call records the `baseUrl` the factory was called with, so tests
-   * can assert that the retry issued after `ensureServer()` targets the
-   * rebound URL.
+   * The read path tries the original URL up to MAX_RETRIES + 1 times, then
+   * may reconnect and issue one more GET. Tests inject retryDelayMs: 0 so
+   * this stays fast.
    */
   const MAX_RETRIES_PLUS_ONE = 3;
-  function queueFlakySdkClients(
-    factoryCount: number,
-  ): Array<{ baseUrl: string }> {
-    const calls: Array<{ baseUrl: string }> = [];
+
+  function mockFlakyThenOk(): { urls: string[] } {
+    const urls: string[] = [];
     let count = 0;
-    for (let i = 0; i < factoryCount; i++) {
-      sdkClientFactory.factories.push((opts: { baseUrl: string }) => ({
-        _client: {
-          get: async () => {
-            count++;
-            calls.push({ baseUrl: opts.baseUrl });
-            if (count <= MAX_RETRIES_PLUS_ONE) {
-              throw new Error("fetch failed");
-            }
-            return {
-              data: { ok: true },
-              error: undefined,
-              response: { status: 200 },
-            };
-          },
-        },
-      }));
-    }
-    return calls;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      count++;
+      urls.push(String(input));
+      if (count <= MAX_RETRIES_PLUS_ONE) {
+        throw new Error("fetch failed");
+      }
+      return jsonOk({ ok: true });
+    });
+    return { urls };
   }
 
   it("rebuilds the SDK client when ensureServer returns a different url", async () => {
-    // Two factories: one for the constructor, one for the post-reconnect
-    // rebuild. Both share the same call-counter closure, so the 4th call
-    // (the retry triggered after reconnect) succeeds.
-    const calls = queueFlakySdkClients(2);
+    const { urls } = mockFlakyThenOk();
 
-    const client = new OpenCodeClient({
-      baseUrl: "http://localhost:4096",
-      autoServe: true,
-    });
+    const client = makeClient({ autoServe: true });
     const originalApi = client.api;
 
     isServerRunningMock.mockResolvedValueOnce({ healthy: false });
@@ -314,22 +324,15 @@ describe("reconnect path", () => {
 
     expect(ensureServerMock).toHaveBeenCalledOnce();
     expect(client.getBaseUrl()).toBe("http://localhost:5000");
-    // First 3 calls (the initial retry loop) target the original URL;
-    // the 4th call — the retry triggered by the reconnect branch — must
-    // observe the rebound baseUrl.
-    expect(calls[0].baseUrl).toBe("http://localhost:4096");
-    expect(calls[calls.length - 1].baseUrl).toBe("http://localhost:5000");
-    // SDK client should be re-instantiated when the URL changes.
+    expect(urls[0]).toContain("http://localhost:4096");
+    expect(urls[urls.length - 1]).toContain("http://localhost:5000");
     expect(client.api).not.toBe(originalApi);
   });
 
   it("does not rebuild the SDK client when ensureServer returns the same url", async () => {
-    queueFlakySdkClients(2);
+    mockFlakyThenOk();
 
-    const client = new OpenCodeClient({
-      baseUrl: "http://localhost:4096",
-      autoServe: true,
-    });
+    const client = makeClient({ autoServe: true });
     const originalApi = client.api;
 
     isServerRunningMock.mockResolvedValueOnce({ healthy: false });
@@ -347,36 +350,28 @@ describe("reconnect path", () => {
   });
 
   it("resets reconnectAttempts after a successful request", async () => {
-    // 4 round-trips × at most 2 factories each (constructor + possible
-    // rebuild). Constructor only registers one factory; the rebuild path
-    // only fires when ensureServer returns a different URL, which it
-    // doesn't here. So 4 round-trips share the constructor factory's
-    // counter — that's exactly what we want: each round-trip resets the
-    // counter independently because we requeue a fresh factory.
-    const client = new OpenCodeClient({
-      baseUrl: "http://localhost:4096",
-      autoServe: true,
-    });
+    const client = makeClient({ autoServe: true });
 
-    // 4 round-trips, each: 3 failures → reconnect (healthy probe) → success.
     for (let i = 0; i < 4; i++) {
-      queueFlakySdkClients(1);
-      // Replace the SDK client's `_client` with the freshly-queued factory's
-      // output so the next request hits a fresh 3-fail-then-succeed cycle.
-      const factory = sdkClientFactory.factories.shift();
-      if (factory) {
-        const fresh = factory({ baseUrl: client.getBaseUrl() }) as { _client: unknown };
-        (client.api as unknown as { _client: unknown })._client = fresh._client;
-      }
+      mockFlakyThenOk();
       isServerRunningMock.mockResolvedValueOnce({ healthy: true, version: "1.14.46" });
       await client.get("/health");
     }
 
-    // All 4 requests should have invoked the reconnect path. If
-    // reconnectAttempts had monotonically grown (the bug), the cap of 3
-    // would have been hit on the 4th request and the reconnect branch
-    // would have been skipped → only 3 probes.
     expect(isServerRunningMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not auto-start or replay a mutation after a connection drop", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("fetch failed"));
+
+    const client = makeClient({ autoServe: true });
+    await expect(client.post("/session", { title: "x" })).rejects.toBeInstanceOf(
+      AmbiguousAcceptanceError,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ensureServerMock).not.toHaveBeenCalled();
   });
 });
 
@@ -397,6 +392,15 @@ describe("subscribeSSE", () => {
     });
   }
 
+  function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+    return new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+  }
+
   /** Drive a fake `fetch` so `subscribeSSE` consumes our scripted body. */
   function installFakeFetch(body: string) {
     return vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
@@ -406,10 +410,6 @@ describe("subscribeSSE", () => {
       text: async () => "",
     } as unknown as Response);
   }
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
 
   /**
    * Regression: the SSE parser used to `split("\n")`, which left a
@@ -451,30 +451,259 @@ describe("subscribeSSE", () => {
 
     expect(events).toEqual([{ event: "ready", data: "hello" }]);
   });
+
+  it("joins multiple data: lines with a newline", async () => {
+    installFakeFetch("event: msg\ndata: line1\ndata: line2\n\n");
+
+    const client = new OpenCodeClient({ baseUrl: "http://localhost:4096" });
+    const events: Array<{ event: string; data: string }> = [];
+    for await (const e of client.subscribeSSE("/events")) {
+      events.push(e);
+    }
+
+    expect(events).toEqual([{ event: "msg", data: "line1\nline2" }]);
+  });
+
+  it("ignores colon-prefix heartbeat comments", async () => {
+    installFakeFetch(": keep-alive\n\nevent: ping\ndata: ok\n\n");
+
+    const client = new OpenCodeClient({ baseUrl: "http://localhost:4096" });
+    const events: Array<{ event: string; data: string }> = [];
+    for await (const e of client.subscribeSSE("/events")) {
+      events.push(e);
+    }
+
+    expect(events).toEqual([{ event: "ping", data: "ok" }]);
+  });
+
+  it("reassembles UTF-8 characters split across chunks", async () => {
+    const encoded = new TextEncoder().encode("event: ready\ndata: café\n\n");
+    const splitAt = encoded.indexOf(0xc3);
+    expect(splitAt).toBeGreaterThan(0);
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      body: streamFromChunks([encoded.slice(0, splitAt + 1), encoded.slice(splitAt + 1)]),
+      text: async () => "",
+    } as unknown as Response);
+
+    const client = new OpenCodeClient({ baseUrl: "http://localhost:4096" });
+    const events: Array<{ event: string; data: string }> = [];
+    for await (const e of client.subscribeSSE("/events")) {
+      events.push(e);
+    }
+
+    expect(events).toEqual([{ event: "ready", data: "café" }]);
+  });
+
+  it("throws OpenCodeError on a non-2xx SSE response", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      body: null,
+      text: async () => "unavailable",
+    } as unknown as Response);
+
+    const client = new OpenCodeClient({ baseUrl: "http://localhost:4096" });
+    await expect(async () => {
+      for await (const _ of client.subscribeSSE("/events")) {
+        /* drain */
+      }
+    }).rejects.toMatchObject({
+      name: "OpenCodeError",
+      status: 503,
+      method: "GET",
+      path: "/events",
+    });
+  });
+
+  it("sends x-opencode-directory when a directory is provided", async () => {
+    const fetchMock = installFakeFetch("event: ready\ndata: hi\n\n");
+    const client = new OpenCodeClient({ baseUrl: "http://localhost:4096" });
+    for await (const _ of client.subscribeSSE("/event", { directory: "/tmp" })) {
+      /* drain */
+    }
+    expect(headerOf(fetchMock.mock.calls[0][1] as RequestInit, "x-opencode-directory")).toBe(
+      "/tmp",
+    );
+  });
 });
 
-// ─── HTTP method dispatch (deferred — see comment at top of file) ────────
+// ─── Wire / replay / deadline (FIX-01, FIX-04) ───────────────────────────
 
-describe.skip("OpenCodeClient HTTP methods (TODO: revive after C1 — HttpTransport interface)", () => {
-  // These tests mocked global `fetch`, which the SDK-routed client no longer
-  // calls directly. Reintroduce when `src/transport.ts` lands so we can
-  // inject a `FetchTransport` and exercise:
-  //   - get / post / patch / put / delete request shapes
-  //   - retry on transient (429/502/503/504) and network errors
-  //   - 204 No Content handling
-  //   - non-JSON content-type passthrough
-  //   - Authorization header presence/absence
-  //   - x-opencode-directory header propagation across all verbs
-  //   - MAX_RETRIES exhaustion behaviour
-  it("placeholder", () => {
-    /* intentionally empty */
+describe("operation-aware fetch adapter", () => {
+  it("WIRE-01: POST JSON Content-Type + serialized JSON; 204 returns undefined without parse throw", async () => {
+    const payload = { foo: 1, nested: { a: "b" } };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      expect(headerOf(init, "content-type")).toMatch(/application\/json/i);
+      expect(init?.body).toBe(JSON.stringify(payload));
+      expect(init?.body).not.toBe(String(payload));
+      expect(init?.body).not.toBe("[object Object]");
+      return mockResponse({
+        status: 204,
+        json: async () => {
+          throw new Error("JSON.parse/json() must not run on 204");
+        },
+      });
+    });
+
+    const client = makeClient();
+    const result = await client.post("/session", payload);
+    expect(result).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  beforeEach(() => {
-    /* no-op */
+  it("WIRE-02: non-2xx empty body still errors; network failure on GET is OpenCode/transport error with method/path", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(mockResponse({ status: 400, body: "" }));
+
+    const client = makeClient();
+    await expect(client.get("/missing")).rejects.toMatchObject({
+      name: "OpenCodeError",
+      status: 400,
+      method: "GET",
+      path: "/missing",
+    });
+
+    fetchMock.mockReset();
+    fetchMock.mockRejectedValue(new Error("fetch failed"));
+    const err = await client.get("/health").then(
+      () => undefined,
+      (error: unknown) => error as OpenCodeError,
+    );
+    expect(err).toBeInstanceOf(OpenCodeError);
+    expect(err?.method).toBe("GET");
+    expect(err?.path).toBe("/health");
+    expect(err?.message).toMatch(/GET/);
+    expect(err?.message).toMatch(/\/health/);
   });
 
-  afterEach(() => {
-    /* no-op */
+  it("WIRE-03: GET transient 503 retried, then success; retry count bounded", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(mockResponse({ status: 503, body: "unavailable" }))
+      .mockResolvedValueOnce(jsonOk({ ok: true }));
+
+    const client = makeClient();
+    await expect(client.get("/health")).resolves.toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ status: 503, body: "unavailable" }))
+      .mockResolvedValueOnce(mockResponse({ status: 503, body: "unavailable" }))
+      .mockResolvedValueOnce(mockResponse({ status: 503, body: "unavailable" }))
+      .mockResolvedValueOnce(jsonOk({ ok: true }));
+
+    await expect(client.get("/health")).rejects.toMatchObject({
+      name: "OpenCodeError",
+      status: 503,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("honors Retry-After seconds on GET 503 when the wait fits the budget", async () => {
+    const sleeps: number[] = [];
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        mockResponse({ status: 503, body: "wait", headers: { "Retry-After": "2" } }),
+      )
+      .mockResolvedValueOnce(jsonOk({ ok: true }));
+
+    const client = makeClient({
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    await expect(client.get("/health")).resolves.toEqual({ ok: true });
+    expect(sleeps).toEqual([2000]);
+  });
+
+  it("WIRE-04: 401 is not retried", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(mockResponse({ status: 401, body: "nope" }));
+
+    const client = makeClient({ autoServe: true });
+    await expect(client.get("/health")).rejects.toMatchObject({
+      name: "OpenCodeError",
+      status: 401,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ensureServerMock).not.toHaveBeenCalled();
+  });
+
+  it("REPLAY-01: POST prompt accepted then socket drop => AmbiguousAcceptanceError, fetch called once", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("socket hang up"));
+
+    const client = makeClient({ autoServe: true });
+    const err = await client
+      .post("/session/s1/prompt_async", { parts: [{ type: "text", text: "hi" }] })
+      .then(
+        () => undefined,
+        (error: unknown) => error as AmbiguousAcceptanceError,
+      );
+
+    expect(err).toBeInstanceOf(AmbiguousAcceptanceError);
+    expect(err?.details.submissionState).toBe("unknown");
+    expect(err?.details.mayStillBeRunning).toBe(true);
+    expect(err?.details.safeToResubmit).toBe(false);
+    expect(err?.details.nextAction).toBe(
+      "Inspect this job or message; do not resend automatically.",
+    );
+    expect(err?.details.operation).toMatch(/POST/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ensureServerMock).not.toHaveBeenCalled();
+  });
+
+  it("REPLAY-04: POST 503 => no second POST", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(mockResponse({ status: 503, body: "unavailable" }));
+
+    const client = makeClient({ autoServe: true });
+    await expect(client.post("/session", { title: "x" })).rejects.toBeInstanceOf(
+      AmbiguousAcceptanceError,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ensureServerMock).not.toHaveBeenCalled();
+  });
+
+  it("DEADLINE-05: timeout aborts a hanging fetch (body read included)", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      return mockResponse({
+        status: 200,
+        body: '{"ok":true}',
+        text: () =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+            });
+          }),
+      });
+    });
+
+    const client = makeClient();
+    const started = Date.now();
+    await expect(
+      client.post("/session/1/prompt_async", { parts: [] }, { timeout: 40 }),
+    ).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send a mutation when the caller aborted before fetch", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const client = makeClient();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      client.post("/session", { title: "x" }, { signal: controller.signal }),
+    ).rejects.not.toBeInstanceOf(AmbiguousAcceptanceError);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -709,10 +709,11 @@ describe("toolError", () => {
     expect(result.content[0].text).toContain("opencode_sessions_overview");
   });
 
-  it("suggests rate limit workaround for 429 errors", () => {
+  it("suggests retrying the same model after a 429, not switching models", () => {
     const result = toolError(new Error("Rate limit exceeded (429)"));
     expect(result.content[0].text).toContain("Suggestions");
-    expect(result.content[0].text).toContain("minimax-m2.1-free");
+    expect(result.content[0].text).toContain("same selected model");
+    expect(result.content[0].text).not.toContain("minimax-m2.1-free");
   });
 
   it("suggests server check for connection errors", () => {
@@ -844,14 +845,12 @@ describe("applyModelDefaults", () => {
     expect(result).toBeUndefined();
   });
 
-  it("returns undefined when only providerID is provided (incomplete pair)", () => {
-    const result = applyModelDefaults("anthropic");
-    expect(result).toBeUndefined();
+  it("throws when only providerID is provided (incomplete pair)", () => {
+    expect(() => applyModelDefaults("anthropic")).toThrow(/Both providerID and modelID/);
   });
 
-  it("returns undefined when only modelID is provided (incomplete pair)", () => {
-    const result = applyModelDefaults(undefined, "claude-opus-4-6");
-    expect(result).toBeUndefined();
+  it("throws when only modelID is provided (incomplete pair)", () => {
+    expect(() => applyModelDefaults(undefined, "claude-opus-4-6")).toThrow(/Both providerID and modelID/);
   });
 
   it("falls back to env-var defaults when no explicit params", () => {
@@ -860,10 +859,9 @@ describe("applyModelDefaults", () => {
     expect(result).toEqual({ providerID: "openai", modelID: "gpt-4o" });
   });
 
-  it("falls back to defaults when only providerID is given (incomplete)", () => {
+  it("rejects a single caller identifier instead of merging defaults", () => {
     setModelDefaults("openai", "gpt-4o");
-    const result = applyModelDefaults("anthropic");
-    expect(result).toEqual({ providerID: "openai", modelID: "gpt-4o" });
+    expect(() => applyModelDefaults("anthropic")).toThrow(/Both providerID and modelID/);
   });
 
   it("explicit params take priority over defaults", () => {
@@ -872,16 +870,14 @@ describe("applyModelDefaults", () => {
     expect(result).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-6" });
   });
 
-  it("returns undefined when only default providerID is set (incomplete pair)", () => {
+  it("throws when only default providerID is set (incomplete pair)", () => {
     setModelDefaults("openai", undefined);
-    const result = applyModelDefaults();
-    expect(result).toBeUndefined();
+    expect(() => applyModelDefaults()).toThrow(/both providerID and modelID/);
   });
 
-  it("returns undefined when only default modelID is set (incomplete pair)", () => {
+  it("throws when only default modelID is set (incomplete pair)", () => {
     setModelDefaults(undefined, "gpt-4o");
-    const result = applyModelDefaults();
-    expect(result).toBeUndefined();
+    expect(() => applyModelDefaults()).toThrow(/both providerID and modelID/);
   });
 });
 
