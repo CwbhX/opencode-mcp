@@ -3,9 +3,10 @@
 Inventory of the MCP surface against the OpenCode HTTP contract used by this
 bridge. Prepared for **opencode-mcp 1.12.0**.
 
-This is **not** a live-certification report. Rows record the request the bridge
-sends, the runtime capability required, which named tests exist, and what has
-actually been verified.
+This is an inventory plus the verification that has actually been run. It is
+**not** a certificate of every tool, OS, or future OpenCode release. Rows
+record the request the bridge sends, the capability required, which named
+tests exist, and what has been verified.
 
 ## Evidence labels
 
@@ -90,9 +91,9 @@ question + 67 other), plus **10 resources** and **6 prompts**.
 | `opencode_ask` | `POST /session`, `POST /session/{id}/message` | Prompt body via `buildPromptBody`; waits for sync response | Configured provider/model pair | MODEL-01 (A/B), MODEL-03 (A) | ~1.18.29 source + Layer B serializers | Sync wait; not a job handle |
 | `opencode_reply` | `GET /session/{id}`, `POST /session/{id}/message` | Same prompt body; session/directory must match | Existing session + model pair | DIR-03 (A), MODEL-01 (A/B) | ~1.18.29 source | Rejects session/directory mismatch before prompt |
 | `opencode_run` | `POST /session` (if needed), `POST /session/{id}/prompt_async`, then status/messages/events | One deadline for submit+wait; returns correlated result or block/timeout | Model pair; job registry in this MCP process | ASYNC-01/02 (A), DEADLINE-03 (A), JOB-* (A) | ~1.18.29 source + Layer A | Timeout does not abort server work; idle ≠ Done |
-| `opencode_fire` | `POST /session` (if needed), `POST /session/{id}/prompt_async` | **204 accepted**; returns `jobId` / `sessionId` / `requestMessageID` / `directory` | Model pair; MCP process must stay up | ASYNC-01/02 (A/B), WIRE-01 (B), REPLAY-01 (A/B) | ~1.18.29 source + Layer B 204 | Handle only. Does not survive MCP exit |
+| `opencode_fire` | `POST /session` (if needed), `POST /session/{id}/prompt_async` | **204 accepted**; returns `jobId` / `sessionId` / `requestMessageID` / `directory` | Model pair; MCP process must stay up | ASYNC-01/02 (A/B), WIRE-01 (B), REPLAY-01 (A/B), FUP-060 (D) | 1.18.29 Layer D live fire→wait | Handle only. Does not survive MCP exit |
 | `opencode_check` | `GET /session/{id}`, `GET /session/status`, `GET /session/{id}/todo`, `GET /session/{id}/diff`, `GET /session/{id}/message` | Observe handle; session-only is untracked | Handle from fire/run, or recovery tuple | JOB-01/02/08/11 (A) | ~1.18.29 source | Idle/absent is not Done |
-| `opencode_wait` | Same reads + event monitor | Wait until terminal, blocked, timed out, or cancelled | Same as check | DEADLINE-03/05 (A), BLOCK-01 (A) | ~1.18.29 source | Timeout ≠ abort; blocked is not a tool error |
+| `opencode_wait` | Same reads + event monitor | Wait until terminal, blocked, timed out, or cancelled | Same as check | DEADLINE-03/05 (A), BLOCK-01 (A), FUP-060 (D) | 1.18.29 Layer D live fire→wait | Timeout ≠ abort; blocked is not a tool error |
 | `opencode_conversation` | `GET /session/{id}/message` | Formatted history | Session exists | — | ~1.18.29 source | Read-only; not a completion signal |
 | `opencode_sessions_overview` | `GET /session`, `GET /session/status` | List + status map | OpenCode | JOB-08 (A) | ~1.18.29 source | Status objects rendered; idle ≠ this-task Done |
 | `opencode_context` | `GET /project/current`, `/path`, `/vcs`, `/config`, `/agent` | Combined snapshot | OpenCode + optional directory | DIR-04 (A) | ~1.18.29 source | Some inner GETs are best-effort |
@@ -101,7 +102,7 @@ question + 67 other), plus **10 resources** and **6 prompts**.
 | `opencode_status` | `GET /global/health`, `/provider`, `/session`, `/vcs` | Dashboard | OpenCode | — | ~1.18.29 source | Read-only |
 | `opencode_health` | `GET /global/health` | `{ healthy, version }` | OpenCode | START-01/03 (A) | ~1.18.29 source | 401 is auth failure, not "down" |
 | `opencode_session_list` | `GET /session` | Session array | OpenCode | — | ~1.18.29 source | Scoped by directory header |
-| `opencode_session_create` | `POST /session` | `{ title? }` | OpenCode | REPLAY-02 (A intent) | ~1.18.29 source | Mutation; no automatic replay |
+| `opencode_session_create` | `POST /session` | `{ title? }` | OpenCode | REPLAY-02 (A intent), FUP-058 (C) | 1.18.29 Layer C isolated serve | Mutation; no automatic replay |
 | `opencode_session_get` | `GET /session/{id}` | Session object | Session exists | JOB-01 (A) | ~1.18.29 source | 404 is missing, not Done |
 | `opencode_session_delete` | `DELETE /session/{id}` | Destructive | Session exists | — | ~1.18.29 source | Not live-tested against a user server |
 | `opencode_session_update` | `PATCH /session/{id}` | `{ title? }` | Session exists | — | ~1.18.29 source | |
@@ -182,24 +183,23 @@ question + 67 other), plus **10 resources** and **6 prompts**.
 
 ## Layer status for this release
 
+Recorded for OpenCode **v1.18.29** against this unreleased follow-up (package
+still labeled `1.12.0`). Host user, home path, OS, and CPU are not part of
+the contract.
+
 | Layer | How to run | Status |
 |---|---|---|
-| A — unit/contract | `npm run test:unit` | Implemented (serializers, transport, task manager, status, directory, startup probe, live-result validator) |
-| B — HTTP + MCP stdio | `npm run test:wire` | HTTP-client fake **and** spawned `node dist/index.js` over MCP stdio against a strict fake OpenCode |
-| C — tagged OpenCode v1.18.29 | `OPENCODE_MCP_SERVER_BINARY=… OPENCODE_MCP_SERVER_TEST=1 npm run test:server` | Harness implemented for binary identity (FUP-055) and isolated serve + MCP `session_create`. Skip without opt-in. Opt-in + missing/wrong binary fails. FUP-056 (local provider fixture / fire / two-step tool turn) is **not** implemented. |
-| D — live model | `OPENCODE_MCP_LIVE_TEST=1 OPENCODE_AUTO_SERVE=false … npm run test:live` | MCP `fire` → `wait`. Skip without opt-in. Opt-in + missing config fails. |
+| A — unit/contract | `npm run test:unit` | Passed (591 tests, 1 skipped). Serializers, transport, task manager, status, directory, startup probe, live-result validator. |
+| B — HTTP + MCP stdio | `npm run test:wire` | Passed (14 tests). HTTP-client fake **and** spawned `node dist/index.js` over MCP stdio against a strict fake OpenCode. Not a real OpenCode process. |
+| C — tagged OpenCode v1.18.29 | `OPENCODE_MCP_SERVER_BINARY=… OPENCODE_MCP_SERVER_TEST=1 npm run test:server` | Passed FUP-055 (binary `1.18.29`) and isolated serve + MCP `session_create` (health version `1.18.29`). Skip without opt-in is not a pass. Opt-in + missing/wrong binary fails. FUP-056 (localhost provider fixture, delayed async completion, two-step tool turn) is **not** implemented. |
+| D — live model | `OPENCODE_MCP_LIVE_TEST=1 OPENCODE_AUTO_SERVE=false … npm run test:live` | Passed one MCP `opencode_fire` → `opencode_wait` probe against a separately managed `opencode serve` **1.18.29**. Requested and observed pair: `opencode/muse-spark-1.3-contributor-free`. `state=succeeded`, `terminal=true`. Skip without opt-in is not a pass. Opt-in with missing config fails. This is not a certification of every tool or of later OpenCode versions. |
 
-G1/G2 (A+B) can pass without proving the user's Mac, account, or selected cloud model.
-A skipped Layer C/D test is not a compatibility certification.
-
-Machine-readable command evidence for a specific checkout lives in
-`verification-summary.json`. That file records dirty-tree fingerprints and
-gate statuses; it is not a live-model certificate.
+Machine-readable command evidence lives in `verification-summary.json`.
 
 ## Dependency audit (recorded, not dismissed)
 
-`npm audit` on 2026-09-07 (Node v25.1.0, npm 11.6.2, lockfile as resolved
-below) reported **16** advisories total and **9** with `--omit=dev`.
+`npm audit` against this lockfile reported **16** advisories total and **9**
+with `--omit=dev`.
 
 Production path is `@modelcontextprotocol/sdk@1.26.0` (stdio MCP). This
 package's entrypoint does not start Hono `serveStatic` or Express. Residual

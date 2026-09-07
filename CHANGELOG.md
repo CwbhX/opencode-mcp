@@ -34,8 +34,15 @@ below are unchanged; they describe the earlier commit, not these fixes.
 - HTTP-client wire tests live in `tests/integration/http-transport-wire.test.ts`.
   `npm run test:wire` also launches `node dist/index.js` over MCP stdio.
 - `docs/compatibility.md` ships in the npm tarball. `verification-summary.json`
-  records gate evidence for a checkout; Layer C/D remain opt-in and are not
-  claimed from a skip.
+  records gate evidence for a checkout.
+
+### Verified
+
+- **OpenCode v1.18.29:** Layer C isolated serve + MCP `session_create`; Layer D
+  live MCP `fire` → `wait` with `opencode/muse-spark-1.3-contributor-free`
+  (requested = observed, `state=succeeded`). FUP-056 (localhost provider
+  fixture / two-step tool turn) is still unimplemented. These runs are not
+  implied by the 1.12.0 notes below.
 
 ## [1.12.0] - 2026-09-06
 

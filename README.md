@@ -47,7 +47,7 @@ claude mcp add opencode -- npx -y opencode-mcp
 }
 ```
 
-That's it. Restart your client and OpenCode's tools will be available.
+That's it for a default attach. For long-lived work, start `opencode serve` first and set `OPENCODE_AUTO_SERVE=false` as in [Recommended deployment](#recommended-deployment).
 
 > See [Configuration](docs/configuration.md) for all client configs (VS Code Copilot, Zed, Amazon Q, etc.) and environment variables.
 
@@ -192,11 +192,35 @@ Prefer a **separately managed** `opencode serve` and point this bridge at it:
 opencode serve --port 4096 --hostname 127.0.0.1
 ```
 
-Then run the MCP server with `OPENCODE_AUTO_SERVE=false` and `OPENCODE_BASE_URL=http://127.0.0.1:4096`. In-memory `jobId` handles do not survive MCP exit; recover with `sessionId` + `requestMessageID` + `directory`. Optional loopback auto-start is only for a genuine connection refusal on `127.0.0.1` / `localhost` / `::1`.
+Then run the MCP server with `OPENCODE_AUTO_SERVE=false` and
+`OPENCODE_BASE_URL=http://127.0.0.1:4096`. Example env for an explicit pair:
+
+```json
+{
+  "env": {
+    "OPENCODE_AUTO_SERVE": "false",
+    "OPENCODE_BASE_URL": "http://127.0.0.1:4096",
+    "OPENCODE_DEFAULT_PROVIDER": "opencode",
+    "OPENCODE_DEFAULT_MODEL": "muse-spark-1.3-contributor-free",
+    "OPENCODE_REQUIRE_EXPLICIT_MODEL": "true",
+    "OPENCODE_ALLOWED_MODELS": "[\"opencode/muse-spark-1.3-contributor-free\"]"
+  }
+}
+```
+
+In-memory `jobId` handles do not survive MCP exit; recover with `sessionId` +
+`requestMessageID` + `directory`. Optional loopback auto-start is only for a
+genuine connection refusal on `127.0.0.1` / `localhost` / `::1`.
 
 Do not set global OpenCode `permission: allow` to make headless tests pass. Reply to permission and question blocks explicitly.
 
-This bridge is verified on local macOS loopback. Remote/Windows filesystems are out of scope. Literal `%` path segments stay rejected.
+**Verified against OpenCode v1.18.29:** isolated tagged-server `session_create`
+through MCP, and one live MCP `opencode_fire` → `opencode_wait` with
+`opencode/muse-spark-1.3-contributor-free` (requested model matched observed;
+`state=succeeded`). That is not a certificate of every tool, host OS, remote
+filesystem, or later OpenCode version. Literal `%` path segments stay
+rejected. The bridge allowlist does not constrain OpenCode subagents, title
+generation, or config changed outside this MCP process.
 
 ## Development
 

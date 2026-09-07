@@ -1,16 +1,12 @@
 {
-  "bridgeCommit": "bd206a35ab192e866950c98ef2218a5f8a4954a1",
+  "bridgeCommit": "30d93f58df2c23073baaeea642fbe1ff9b5dcb0a",
   "reviewedCommit": "bd206a35ab192e866950c98ef2218a5f8a4954a1",
   "workingTreeDirty": true,
-  "dirtyTreeFingerprintSha256": "38186f2049cffdaff38bf897fb72f159e49ff942019672fea536b174dab777cd",
+  "dirtyTreeFingerprintSha256": null,
   "builtFromCurrentSource": true,
-  "recordedAt": "2026-09-07T05:14:00Z",
+  "recordedAt": "2026-09-07T05:40:00Z",
   "environment": {
-    "os": "Darwin",
-    "arch": "arm64",
-    "uname": "Darwin arm64",
-    "node": "v25.1.0",
-    "npm": "11.6.2"
+    "note": "Host user, home directory, OS, and CPU are not recorded. Replay gates with local OPENCODE_MCP_SERVER_BINARY and OPENCODE_BASE_URL."
   },
   "dependencies": {
     "mcpSdkRange": "^1.12.1",
@@ -23,12 +19,12 @@
   },
   "opencode": {
     "regressionTarget": "1.18.29",
-    "pathBinary": "/Users/clement/.opencode/bin/opencode",
-    "pathBinaryVersion": "1.17.18",
-    "binaryVersion": null,
-    "healthVersion": null,
+    "pathBinary": null,
+    "pathBinaryVersion": "1.18.29",
+    "binaryVersion": "1.18.29",
+    "healthVersion": "1.18.29",
     "fixtureConfigHash": null,
-    "notes": "PATH OpenCode is 1.17.18 and is not the Layer C target. No OPENCODE_MCP_SERVER_BINARY for 1.18.29 was provided. opencode.ai/changelog still listed v1.18.29 among current Core notes when checked; the page is mutable."
+    "notes": "Layer C used OPENCODE_MCP_SERVER_BINARY pointing at an OpenCode 1.18.29 executable. Layer D used a separately managed opencode serve on loopback whose /global/health version was 1.18.29. FUP-056 localhost provider fixture remains unimplemented."
   },
   "preservedFindings": {
     "final401AlreadyBlocksSpawn": true,
@@ -80,10 +76,19 @@
       "notes": "Labeled skip JSON; not a live pass."
     },
     {
-      "cmd": "OPENCODE_MCP_LIVE_TEST=1 npm run test:live",
-      "exitCode": 1,
-      "status": "failed",
-      "notes": "Opt-in with missing OPENCODE_BASE_URL / provider / model is a configuration failure."
+      "cmd": "OPENCODE_MCP_SERVER_BINARY=/absolute/path/to/opencode OPENCODE_MCP_SERVER_TEST=1 npm run test:server",
+      "exitCode": 0,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "status": "passed",
+      "notes": "FUP-055 binary 1.18.29; isolated serve + MCP session_create. Health version 1.18.29. FUP-056 not covered."
+    },
+    {
+      "cmd": "OPENCODE_MCP_LIVE_TEST=1 OPENCODE_AUTO_SERVE=false OPENCODE_BASE_URL=http://127.0.0.1:4096 OPENCODE_DEFAULT_PROVIDER=opencode OPENCODE_DEFAULT_MODEL=muse-spark-1.3-contributor-free npm run test:live",
+      "exitCode": 0,
+      "status": "passed",
+      "notes": "MCP fire→wait; requested=observed opencode/muse-spark-1.3-contributor-free; state=succeeded. One nonce probe."
     },
     {
       "cmd": "npm pack --dry-run --json",
@@ -134,26 +139,26 @@
       "notes": "HTTP-client fake plus real node dist/index.js MCP stdio against a strict fake OpenCode. Not a real OpenCode process."
     },
     "C": {
-      "status": "blocked_environment",
-      "passed": 0,
+      "status": "passed",
+      "passed": 2,
       "failed": 0,
-      "skipped": 2,
-      "command": "npm run test:server",
-      "notes": "Default run skipped. Opt-in without binary exits 1. No v1.18.29 executable in this environment. FUP-056 localhost provider fixture is not implemented."
+      "skipped": 0,
+      "command": "OPENCODE_MCP_SERVER_BINARY=… OPENCODE_MCP_SERVER_TEST=1 npm run test:server",
+      "notes": "Binary and health 1.18.29; isolated serve + MCP session_create. FUP-056 localhost provider fixture is not implemented."
     },
     "D": {
-      "status": "not_run",
-      "passed": 0,
+      "status": "passed",
+      "passed": 1,
       "failed": 0,
-      "skipped": 1,
-      "command": "npm run test:live",
-      "notes": "No owner-authorized live credentials in this session. Skip without opt-in (exit 0) and missing-config failure (exit 1) were verified. FUP-060 fire→wait against muse-spark-1.3-contributor-free was not executed."
+      "skipped": 0,
+      "command": "OPENCODE_MCP_LIVE_TEST=1 … npm run test:live",
+      "notes": "Separately managed serve 1.18.29. MCP fire→wait succeeded with matching model identity. Not a full-tool certification."
     }
   },
   "liveModel": {
     "requested": "opencode/muse-spark-1.3-contributor-free",
-    "observed": null,
-    "outcome": "not_run"
+    "observed": "opencode/muse-spark-1.3-contributor-free",
+    "outcome": "passed"
   },
   "audit": {
     "total": 16,
@@ -246,12 +251,12 @@
     "FUP-052": { "status": "passed", "layers": ["A"] },
     "FUP-053": { "status": "passed", "layers": ["B"] },
     "FUP-054": { "status": "passed", "layers": ["B"] },
-    "FUP-055": { "status": "blocked_environment", "layers": ["C"], "notes": "Opt-in without binary fails. No 1.18.29 binary present to pass." },
+    "FUP-055": { "status": "passed", "layers": ["C"], "notes": "OPENCODE_MCP_SERVER_BINARY reported 1.18.29." },
     "FUP-056": { "status": "not_run", "layers": ["C"], "notes": "Localhost provider fixture / delayed async / two-step tool turn not implemented. Do not treat session_create smoke as this gate." },
     "FUP-057": { "status": "passed", "layers": ["A"], "notes": "permission/question unit tests; not MCP-stdio or tagged-server C" },
-    "FUP-058": { "status": "blocked_environment", "layers": ["C"], "notes": "Isolated-serve harness exists; not executed without 1.18.29." },
+    "FUP-058": { "status": "passed", "layers": ["C"], "notes": "Isolated HOME/config/data; serve + MCP session_create. Not a full FUP-056 fixture." },
     "FUP-059": { "status": "passed", "layers": ["A"] },
-    "FUP-060": { "status": "not_run", "layers": ["D"] },
+    "FUP-060": { "status": "passed", "layers": ["D"], "notes": "Live MCP fire→wait; requested=observed; state=succeeded. One nonce probe." },
     "FUP-061": { "status": "passed", "layers": ["A", "D"], "notes": "Skip without opt-in (exit 0) and missing-config opt-in (exit 1) verified. Unavailable selected model not live-tested." },
     "FUP-062": { "status": "passed", "layers": ["A"], "notes": "validator/live-script retain scratch on uncertain work; live failure-cleanup not exercised against a real model" },
     "FUP-063": { "status": "passed", "layers": ["package"], "notes": "npm pack --dry-run includes docs/compatibility.md, README, LICENSE" },

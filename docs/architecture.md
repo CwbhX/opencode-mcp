@@ -25,6 +25,8 @@ src/
 ├── task-status.ts        Evidence-to-status reducer (idle ≠ Done)
 ├── model-selection.ts    Endpoint-specific model serializers
 ├── request-context.ts    Absolute directory + session identity
+├── event-monitor.ts      Scoped SSE; ready only on server.connected
+├── typed-outcome.ts      Typed assistant/provider/server-auth errors
 ├── helpers.ts            Response formatting + tool annotation constants
 ├── resources.ts          MCP Resources (10 browseable data endpoints)
 ├── prompts.ts            MCP Prompts (6 guided workflow templates)
@@ -64,6 +66,7 @@ The workflow layer reduces tool calls. `opencode_ask` is a sync prompt.
 `opencode_run` / `opencode_fire` submit through `/prompt_async`. `fire`
 returns an accepted handle (`jobId`, `sessionId`, `requestMessageID`,
 `directory`); `check` / `wait` observe that handle. Idle is not Done.
+Sync and async turns on the same session share a local lease.
 
 ### Tool Annotations
 
@@ -91,7 +94,8 @@ Raw API responses are deeply nested JSON. The `helpers.ts` module transforms the
 - **Directory validation** — Absolute existing directories only; `~` and
   relative paths are rejected. Sent as `x-opencode-directory`
 - **Read reconnect** — Connection-refused GETs may probe/auto-start on
-  loopback. Auth failures never spawn or replay a POST
+  loopback. A later 401/unhealthy probe is the error that surfaces. Auth
+  failures never spawn. Jobs are not moved if reconnect would change the URL.
 
 ### Default Provider/Model
 
@@ -99,13 +103,17 @@ Tools that accept `providerID` and `modelID` resolve a **full pair** only:
 
 1. **Explicit params** — both `providerID` and `modelID` on the call
 2. **Env-var defaults** — both `OPENCODE_DEFAULT_PROVIDER` and `OPENCODE_DEFAULT_MODEL`
-3. **Server selection** — only when neither pair is set **and**
+3. **Server selection** — only when neither pair is set, a nonempty
+   `OPENCODE_ALLOWED_MODELS` is **not** set, and
    `OPENCODE_REQUIRE_EXPLICIT_MODEL` is not `true`
 
-A single identifier is rejected and is not merged with a default. Optional
+A single identifier is rejected and is not merged with a default. Empty or
+whitespace identifiers are invalid, not “use defaults.” Optional
 `OPENCODE_ALLOWED_MODELS` (JSON array of `provider/model` strings) rejects
-pairs outside the list. There is no paid fallback and no hardcoded free-model
-catalog. `variant` is a separate top-level field on prompt/command requests.
+pairs outside the list and cannot be bypassed by omitting the pair; the first
+entry is not substituted. There is no paid fallback and no hardcoded free-model
+catalog. `variant` is a separate top-level field on prompt/command requests;
+init and summarize reject it.
 
 ### Auto-Start
 
@@ -115,7 +123,8 @@ On startup, the MCP probes `OPENCODE_BASE_URL/global/health`:
 - **Connection refused** on loopback — `createOpencodeServer()` starts an
   OpenCode **SDK child process**. This is not an in-process engine.
   `opencode_fire` jobs do not survive this MCP process exiting.
-- **401/403, HTML, timeout, remote host** — classified error; **do not spawn**.
+- **401/403, HTML, timeout, TLS/DNS, generic `fetch failed`, remote host** —
+  classified error; **do not spawn**.
 
 Shutdown handlers (`SIGINT`, `SIGTERM`, `exit`) close an owned child. An
 externally launched `opencode serve` is left running.

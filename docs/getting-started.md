@@ -11,7 +11,21 @@ Set up opencode-mcp in under 2 minutes.
   - or `brew install sst/tap/opencode`
 - An **MCP-compatible client** (Claude Desktop, Claude Code, Cursor, Windsurf, etc.)
 
-## Step 1: Add to Your Client
+## Step 1: Run OpenCode
+
+Prefer a separately managed server on loopback:
+
+```bash
+opencode serve --port 4096 --hostname 127.0.0.1
+```
+
+Then point the MCP bridge at it with `OPENCODE_AUTO_SERVE=false` (see
+[Configuration](configuration.md)). Optional auto-start is only a loopback
+fallback when the health probe is connection-refused. HTTP **401 does not
+spawn**. An SDK child is not in-process: background `opencode_fire` jobs die
+when this MCP process exits.
+
+## Step 2: Add to Your Client
 
 **Claude Code:**
 
@@ -32,18 +46,28 @@ claude mcp add opencode -- npx -y opencode-mcp
 }
 ```
 
-See [Configuration](configuration.md) for all client configs (VS Code Copilot, Zed, Amazon Q, OpenCode itself, etc.).
+See [Configuration](configuration.md) for all client configs (VS Code Copilot, Zed, Amazon Q, OpenCode itself, etc.). Example env for a separately managed server:
 
-## Step 2: Restart Your Client
+```json
+{
+  "mcpServers": {
+    "opencode": {
+      "command": "npx",
+      "args": ["-y", "opencode-mcp"],
+      "env": {
+        "OPENCODE_AUTO_SERVE": "false",
+        "OPENCODE_BASE_URL": "http://127.0.0.1:4096"
+      }
+    }
+  }
+}
+```
 
-Restart your MCP client after editing the config. That's it.
+## Step 3: Restart Your Client
 
-If the health probe is **connection-refused** on a **loopback** URL, the
-MCP starts an OpenCode **SDK child process**. HTTP **401 does not spawn**.
-That child is not in-process: background `opencode_fire` jobs die when this
-MCP process exits. For long-lived work, run `opencode serve` yourself.
+Restart your MCP client after editing the config.
 
-## Step 3: Verify
+## Step 4: Verify
 
 Ask your client to run a tool:
 
@@ -113,12 +137,13 @@ auto-start another server. Add the same credentials the server expects:
 
 ### Disable auto-start
 
-If you prefer to manage the OpenCode server yourself:
+Recommended when you already run `opencode serve`:
 
 ```json
 {
   "env": {
-    "OPENCODE_AUTO_SERVE": "false"
+    "OPENCODE_AUTO_SERVE": "false",
+    "OPENCODE_BASE_URL": "http://127.0.0.1:4096"
   }
 }
 ```

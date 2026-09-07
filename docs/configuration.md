@@ -10,7 +10,7 @@ server URL/auth, or you want a default / allowlisted model pair.
 | `OPENCODE_BASE_URL` | URL of the OpenCode headless server | `http://127.0.0.1:4096` | No |
 | `OPENCODE_SERVER_USERNAME` | HTTP basic auth username | `opencode` | No |
 | `OPENCODE_SERVER_PASSWORD` | HTTP basic auth password | *(none — auth disabled)* | No |
-| `OPENCODE_AUTO_SERVE` | Auto-start an SDK child on **loopback** only when the health probe is connection-refused | `true` | No |
+| `OPENCODE_AUTO_SERVE` | Auto-start an SDK child on **loopback** only when the health probe is connection-refused. Generic `fetch failed` / 401 do not spawn. | `true` | No |
 | `OPENCODE_DEFAULT_PROVIDER` | Default provider ID when not specified per-tool | *(none)* | No (must pair with model) |
 | `OPENCODE_DEFAULT_MODEL` | Default model ID when not specified per-tool | *(none)* | No (must pair with provider) |
 | `OPENCODE_REQUIRE_EXPLICIT_MODEL` | When `true`, require an explicit or configured full provider/model pair | *(unset)* | No |
@@ -26,7 +26,8 @@ server URL/auth, or you want a default / allowlisted model pair.
 - **The base URL** should point to where `opencode serve` is listening. If running on the same machine with default settings, you don't need to set this.
 - **Default provider/model** are optional. When set, tools that accept `providerID`/`modelID` use this pair when the call omits both. A single identifier (caller or default) is **rejected** and is not merged with the other side. There is no paid-model fallback and no hardcoded free-model list. Discover current models with `opencode_setup` / `opencode_provider_list`.
 - **`OPENCODE_REQUIRE_EXPLICIT_MODEL=true`** fails the call unless a full pair is supplied on the tool or via the two default env vars.
-- **`OPENCODE_ALLOWED_MODELS`** must be a JSON array of strings such as `["opencode/muse-spark-1.3-contributor-free"]`. Other pairs are rejected before dispatch.
+- **`OPENCODE_ALLOWED_MODELS`** must be a JSON array of strings such as `["opencode/muse-spark-1.3-contributor-free"]`. Other pairs are rejected before dispatch. A nonempty list cannot be bypassed by omitting the pair, and the first entry is not substituted for a different request. The list is a bridge policy; it does not lock OpenCode subagents, title generation, or config changed outside this process.
+- **Auto-start** treats only typed connection-refused on loopback as permission to spawn. Generic `fetch failed`, DNS, TLS, HTML, timeout, and HTTP 401/403 do not start another server.
 - **Directory validation** — `directory` must be an **absolute existing directory**. `~`, relative paths, files, control characters, and literal `%` path segments are rejected. Omitted `directory` uses the OpenCode server's project context, not this MCP process's cwd.
 
 ## MCP Client Configurations
@@ -231,22 +232,24 @@ a wait.
 
 ## Auto-Start
 
-When `OPENCODE_AUTO_SERVE` is not `"false"`, the bridge probes
+Prefer a separately managed `opencode serve` with `OPENCODE_AUTO_SERVE=false`.
+When auto-start is left on, the bridge probes
 `OPENCODE_BASE_URL/global/health`:
 
 - **Healthy** — attach; do not spawn.
 - **Connection refused on loopback** (`127.0.0.1`, `localhost`, `::1`) — start
   an OpenCode **SDK child process**. This is not an in-process engine.
   `opencode_fire` work does not survive this MCP process exiting.
-- **401/403, HTML, timeout, or a remote host** — fail with a classified
-  error. **401 does not spawn** another server.
+- **401/403, HTML, timeout, TLS/DNS, generic `fetch failed`, or a remote host**
+  — fail with a classified error. **401 does not spawn** another server.
 
-Disable auto-start if you manage OpenCode yourself:
+Disable auto-start if you manage OpenCode yourself (recommended):
 
 ```json
 {
   "env": {
-    "OPENCODE_AUTO_SERVE": "false"
+    "OPENCODE_AUTO_SERVE": "false",
+    "OPENCODE_BASE_URL": "http://127.0.0.1:4096"
   }
 }
 ```
