@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OpenCodeClient } from "../src/client.js";
+import { resetEventMonitorsForTests } from "../src/event-monitor.js";
 import { registerGlobalTools } from "../src/tools/global.js";
 import { registerWorkflowTools } from "../src/tools/workflow.js";
 import { registerConfigTools } from "../src/tools/config.js";
@@ -12,6 +13,26 @@ import { registerProviderTools } from "../src/tools/provider.js";
 
 // ─── Mock client factory ─────────────────────────────────────────────────
 
+function hangingConnectedSse() {
+  return async function* subscribeSSE(
+    _path: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<{ event: string; data: string }> {
+    yield { event: "message", data: JSON.stringify({ type: "server.connected" }) };
+    await new Promise<void>((resolve) => {
+      if (!opts?.signal) {
+        resolve();
+        return;
+      }
+      if (opts.signal.aborted) {
+        resolve();
+        return;
+      }
+      opts.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  };
+}
+
 function createMockClient(overrides: Record<string, unknown> = {}) {
   return {
     get: vi.fn().mockResolvedValue({}),
@@ -19,11 +40,15 @@ function createMockClient(overrides: Record<string, unknown> = {}) {
     patch: vi.fn().mockResolvedValue({}),
     put: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue(undefined),
-    subscribeSSE: vi.fn(),
+    subscribeSSE: hangingConnectedSse(),
     getBaseUrl: vi.fn().mockReturnValue("http://localhost:4096"),
     ...overrides,
   } as unknown as OpenCodeClient;
 }
+
+afterEach(() => {
+  resetEventMonitorsForTests();
+});
 
 // ─── Tool registration capture ───────────────────────────────────────────
 
@@ -230,6 +255,26 @@ describe("Tool handlers", () => {
       expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-3" });
     });
 
+    it("puts variant at the top level of the prompt body", async () => {
+      await handler({
+        prompt: "test",
+        providerID: "anthropic",
+        modelID: "claude-3",
+        variant: "fast",
+      });
+      const [, body] = (mockClient.post as ReturnType<typeof vi.fn>).mock.calls[1];
+      expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-3" });
+      expect(body.variant).toBe("fast");
+      expect(body.model).not.toHaveProperty("variant");
+    });
+
+    it("rejects a half model pair without POSTing", async () => {
+      const result = await handler({ prompt: "test", providerID: "anthropic" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/providerID and modelID|IncompleteModelSelection/i);
+      expect((mockClient.post as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    });
+
     it("includes agent when set", async () => {
       await handler({ prompt: "test", agent: "build" });
       const [, body] = (mockClient.post as ReturnType<typeof vi.fn>).mock.calls[1];
@@ -269,7 +314,7 @@ describe("Tool handlers", () => {
       const askHandler = tools.get("opencode_ask")!;
       const result = await askHandler({ prompt: "test" });
       expect(result.content[0].text).toContain("WARNING");
-      expect(result.content[0].text).toContain("empty response");
+      expect(result.content[0].text).toMatch(/protocol\/observation failure|absent/i);
     });
 
     it("warns when response has no text content", async () => {
@@ -313,7 +358,7 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_reply")!;
       const result = await handler({ sessionId: "s1", prompt: "follow up" });
       expect(result.content[0].text).toContain("WARNING");
-      expect(result.content[0].text).toContain("empty response");
+      expect(result.content[0].text).toMatch(/protocol\/observation failure|absent/i);
     });
 
     it("does not warn for valid reply", async () => {
@@ -334,6 +379,51 @@ describe("Tool handlers", () => {
       const result = await handler({ sessionId: "s1", prompt: "follow up" });
       expect(result.content[0].text).toContain("Sure, here you go");
       expect(result.content[0].text).not.toContain("WARNING");
+    });
+
+    it("rejects a half model pair without POSTing", async () => {
+      const mockClient = createMockClient({
+        post: vi.fn(),
+      });
+      const tools = new Map<string, Function>();
+      const mockServer = {
+        tool: vi.fn((...args: unknown[]) => {
+          tools.set(args[0] as string, args[args.length - 1] as Function);
+        }),
+      } as unknown as McpServer;
+      registerWorkflowTools(mockServer, mockClient);
+      const handler = tools.get("opencode_reply")!;
+      const result = await handler({
+        sessionId: "s1",
+        prompt: "follow up",
+        modelID: "claude-3",
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/providerID and modelID|IncompleteModelSelection/i);
+      expect((mockClient.post as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    });
+
+    it("GETs the session and rejects a directory mismatch before POST", async () => {
+      const mockClient = createMockClient({
+        get: vi.fn().mockResolvedValue({ id: "s1", directory: "/tmp" }),
+        post: vi.fn(),
+      });
+      const tools = new Map<string, Function>();
+      const mockServer = {
+        tool: vi.fn((...args: unknown[]) => {
+          tools.set(args[0] as string, args[args.length - 1] as Function);
+        }),
+      } as unknown as McpServer;
+      registerWorkflowTools(mockServer, mockClient);
+      const handler = tools.get("opencode_reply")!;
+      const result = await handler({
+        sessionId: "s1",
+        prompt: "follow up",
+        directory: process.cwd(),
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/SESSION_DIRECTORY_MISMATCH|does not match/i);
+      expect((mockClient.post as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
     });
   });
 
@@ -914,7 +1004,7 @@ describe("Tool handlers", () => {
   });
 
   describe("opencode_session_status (N3 fix)", () => {
-    it("returns 'All sessions idle' for empty status object", async () => {
+    it("reports an empty status map without claiming idle-as-done", async () => {
       const mockClient = createMockClient({
         get: vi.fn().mockResolvedValue({}),
       });
@@ -929,13 +1019,14 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_session_status")!;
       const result = await handler({});
       const text = result.content[0].text;
-      expect(text).toContain("All sessions idle");
+      expect(text).toContain("No sessions reported active");
+      expect(text).toContain("idle entries are omitted");
       expect(text).not.toContain("{}");
     });
 
-    it("formats non-empty status as a list", async () => {
+    it("formats non-empty status as a list using idle|busy|retry", async () => {
       const mockClient = createMockClient({
-        get: vi.fn().mockResolvedValue({ "session-1": "running", "session-2": "idle" }),
+        get: vi.fn().mockResolvedValue({ "session-1": "busy", "session-2": "idle" }),
       });
       const tools = new Map<string, Function>();
       const mockServer = {
@@ -949,7 +1040,7 @@ describe("Tool handlers", () => {
       const result = await handler({});
       const text = result.content[0].text;
       expect(text).toContain("Session Status (2)");
-      expect(text).toContain("session-1: running");
+      expect(text).toContain("session-1: busy");
       expect(text).toContain("session-2: idle");
     });
   });
@@ -1114,7 +1205,7 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_message_send")!;
       const result = await handler({ sessionId: "s1", text: "hello" });
       expect(result.content[0].text).toContain("WARNING");
-      expect(result.content[0].text).toContain("empty response");
+      expect(result.content[0].text).toMatch(/protocol\/observation failure|absent/i);
     });
 
     it("warns when response has no text content", async () => {
@@ -1282,15 +1373,28 @@ describe("Tool handlers", () => {
   // ─── New features ───────────────────────────────────────────────────
 
   describe("opencode_provider_test", () => {
-    it("reports success when provider returns valid response", async () => {
+    it("reports success when provider returns matching model metadata", async () => {
+      const getMock = vi.fn().mockImplementation((path: string) => {
+        if (path === "/provider") {
+          return Promise.resolve({
+            all: [{ id: "anthropic", default: "claude-3", models: { "claude-3": {} } }],
+          });
+        }
+        return Promise.resolve({});
+      });
       const postMock = vi.fn()
-        .mockResolvedValueOnce({ id: "test-session" }) // create session
-        .mockResolvedValueOnce({ // send message
-          info: { id: "m1", role: "assistant" },
+        .mockResolvedValueOnce({ id: "test-session" })
+        .mockResolvedValueOnce({
+          info: {
+            id: "m1",
+            role: "assistant",
+            providerID: "anthropic",
+            modelID: "claude-3",
+          },
           parts: [{ type: "text", text: "Hello" }],
         });
       const deleteMock = vi.fn().mockResolvedValue(undefined);
-      const mockClient = createMockClient({ post: postMock, delete: deleteMock });
+      const mockClient = createMockClient({ get: getMock, post: postMock, delete: deleteMock });
       const tools = new Map<string, Function>();
       const mockServer = {
         tool: vi.fn((...args: unknown[]) => {
@@ -1305,7 +1409,9 @@ describe("Tool handlers", () => {
       expect(text).toContain("anthropic");
       expect(text).toContain("is working");
       expect(text).toContain("Hello");
-      // Should clean up the test session
+      const [, body] = postMock.mock.calls[1];
+      expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-3" });
+      expect(body).not.toHaveProperty("providerID");
       expect(deleteMock).toHaveBeenCalled();
     });
 
@@ -1324,16 +1430,44 @@ describe("Tool handlers", () => {
       registerWorkflowTools(mockServer, mockClient);
 
       const handler = tools.get("opencode_provider_test")!;
-      const result = await handler({ providerId: "badprovider" });
+      const result = await handler({ providerId: "badprovider", modelID: "claude-3" });
       const text = result.content[0].text;
       expect(text).toContain("FAILED");
       expect(text).toContain("badprovider");
       expect(result.isError).toBe(true);
-      // Should still clean up
       expect(deleteMock).toHaveBeenCalled();
     });
 
-    it("cleans up test session even on API error", async () => {
+    it("MODEL-08: observed model mismatch fails the test and still cleans up", async () => {
+      const postMock = vi.fn()
+        .mockResolvedValueOnce({ id: "test-session" })
+        .mockResolvedValueOnce({
+          info: {
+            id: "m1",
+            role: "assistant",
+            providerID: "openai",
+            modelID: "gpt-4",
+          },
+          parts: [{ type: "text", text: "Hello" }],
+        });
+      const deleteMock = vi.fn().mockResolvedValue(undefined);
+      const mockClient = createMockClient({ post: postMock, delete: deleteMock });
+      const tools = new Map<string, Function>();
+      const mockServer = {
+        tool: vi.fn((...args: unknown[]) => {
+          tools.set(args[0] as string, args[args.length - 1] as Function);
+        }),
+      } as unknown as McpServer;
+      registerWorkflowTools(mockServer, mockClient);
+
+      const handler = tools.get("opencode_provider_test")!;
+      const result = await handler({ providerId: "anthropic", modelID: "claude-3" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/FAILED|MODEL MISMATCH|mismatch/i);
+      expect(deleteMock).toHaveBeenCalled();
+    });
+
+    it("keeps the session id and does not delete on timeout", async () => {
       const postMock = vi.fn()
         .mockResolvedValueOnce({ id: "test-session" })
         .mockRejectedValueOnce(new Error("API timeout"));
@@ -1348,11 +1482,67 @@ describe("Tool handlers", () => {
       registerWorkflowTools(mockServer, mockClient);
 
       const handler = tools.get("opencode_provider_test")!;
-      const result = await handler({ providerId: "anthropic" });
+      const result = await handler({ providerId: "anthropic", modelID: "claude-3" });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("API timeout");
-      // Should attempt cleanup
-      expect(deleteMock).toHaveBeenCalledWith("/session/test-session", undefined, undefined);
+      expect(result.content[0].text).toContain("test-session");
+      expect(deleteMock).not.toHaveBeenCalled();
+    });
+
+    it("FUP-005: discovered default outside the allowlist is rejected with no session/prompt", async () => {
+      const previous = process.env.OPENCODE_ALLOWED_MODELS;
+      process.env.OPENCODE_ALLOWED_MODELS = JSON.stringify([
+        "opencode/muse-spark-1.3-contributor-free",
+      ]);
+      try {
+        const getMock = vi.fn().mockResolvedValue({
+          all: [{ id: "anthropic", default: "claude-3", models: { "claude-3": {} } }],
+        });
+        const postMock = vi.fn();
+        const deleteMock = vi.fn();
+        const mockClient = createMockClient({ get: getMock, post: postMock, delete: deleteMock });
+        const tools = new Map<string, Function>();
+        const mockServer = {
+          tool: vi.fn((...args: unknown[]) => {
+            tools.set(args[0] as string, args[args.length - 1] as Function);
+          }),
+        } as unknown as McpServer;
+        registerWorkflowTools(mockServer, mockClient);
+
+        const handler = tools.get("opencode_provider_test")!;
+        const result = await handler({ providerId: "anthropic" });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/not in the allowed models list/i);
+        expect(postMock).not.toHaveBeenCalled();
+        expect(deleteMock).not.toHaveBeenCalled();
+      } finally {
+        if (previous === undefined) delete process.env.OPENCODE_ALLOWED_MODELS;
+        else process.env.OPENCODE_ALLOWED_MODELS = previous;
+      }
+    });
+
+    it("rejects before prompt when the provider has no resolvable default model", async () => {
+      const getMock = vi.fn().mockResolvedValue({
+        all: [
+          { id: "anthropic", models: { "claude-3": {} } },
+          { id: "openai", default: "gpt-4", models: { "gpt-4": {} } },
+        ],
+      });
+      const postMock = vi.fn();
+      const mockClient = createMockClient({ get: getMock, post: postMock });
+      const tools = new Map<string, Function>();
+      const mockServer = {
+        tool: vi.fn((...args: unknown[]) => {
+          tools.set(args[0] as string, args[args.length - 1] as Function);
+        }),
+      } as unknown as McpServer;
+      registerWorkflowTools(mockServer, mockClient);
+
+      const handler = tools.get("opencode_provider_test")!;
+      const result = await handler({ providerId: "anthropic" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/default model|resolve/i);
+      expect(postMock).not.toHaveBeenCalled();
     });
   });
 
@@ -1573,11 +1763,9 @@ describe("Tool handlers", () => {
       expect(result.content[0].text).toContain("rejected");
     });
 
-    it("falls back to deprecated endpoint when new API fails", async () => {
-      let callCount = 0;
+    it("does not fall back to the legacy route on a generic 404 error", async () => {
       const mockClient = createMockClient({
         post: vi.fn().mockImplementation((path: string) => {
-          callCount++;
           if (path.startsWith("/permission/")) {
             return Promise.reject(new Error("404 not found"));
           }
@@ -1598,9 +1786,9 @@ describe("Tool handlers", () => {
         permissionID: "perm_1",
         reply: "once",
       });
-      expect(result.content[0].text).toContain("approved");
-      // Should have tried new endpoint first, then deprecated
-      expect((mockClient as any).post).toHaveBeenCalledTimes(2);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("404 not found");
+      expect((mockClient as any).post).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1613,7 +1801,7 @@ describe("Tool handlers", () => {
             { id: "s2", title: "Add feature" },
           ]);
           if (path === "/session/status") return Promise.resolve({
-            s1: { state: "running" },
+            s1: { state: "busy" },
             s2: { state: "idle" },
           });
           return Promise.resolve({});
@@ -1630,7 +1818,7 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_sessions_overview")!;
       const result = await handler({});
       const text = result.content[0].text;
-      expect(text).toContain("[running] Fix bug");
+      expect(text).toContain("[busy] Fix bug");
       expect(text).toContain("[idle] Add feature");
       expect(text).not.toContain("[object Object]");
     });
@@ -1642,7 +1830,7 @@ describe("Tool handlers", () => {
             { id: "s1", title: "Session A" },
           ]);
           if (path === "/session/status") return Promise.resolve({
-            s1: "running",
+            s1: "busy",
           });
           return Promise.resolve({});
         }),
@@ -1657,10 +1845,10 @@ describe("Tool handlers", () => {
 
       const handler = tools.get("opencode_sessions_overview")!;
       const result = await handler({});
-      expect(result.content[0].text).toContain("[running] Session A");
+      expect(result.content[0].text).toContain("[busy] Session A");
     });
 
-    it("falls back to idle for null/undefined status", async () => {
+    it("labels missing status-map entries as absent, not idle/Done", async () => {
       const mockClient = createMockClient({
         get: vi.fn().mockImplementation((path: string) => {
           if (path === "/session") return Promise.resolve([
@@ -1680,7 +1868,8 @@ describe("Tool handlers", () => {
 
       const handler = tools.get("opencode_sessions_overview")!;
       const result = await handler({});
-      expect(result.content[0].text).toContain("[idle] Orphan session");
+      expect(result.content[0].text).toMatch(/\[absent\] Orphan session|idle \(not in status map\)/);
+      expect(result.content[0].text).not.toContain("Done!");
     });
 
     it("returns 'No sessions found.' when empty", async () => {
@@ -1732,8 +1921,8 @@ describe("Tool handlers", () => {
     it("resolves object statuses with { state } field", async () => {
       const mockClient = createMockClient({
         get: vi.fn().mockResolvedValue({
-          "session-1": { state: "running" },
-          "session-2": { state: "idle" },
+          "session-1": { type: "busy" },
+          "session-2": { type: "idle" },
         }),
       });
       const tools = new Map<string, Function>();
@@ -1747,22 +1936,22 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_session_status")!;
       const result = await handler({});
       const text = result.content[0].text;
-      expect(text).toContain("session-1: running");
+      expect(text).toContain("session-1: busy");
       expect(text).toContain("session-2: idle");
       expect(text).not.toContain("[object Object]");
     });
   });
 
   describe("opencode_wait (v1.6.0 — status resolution + timeout message)", () => {
-    it("detects completion from object status { state: 'idle' }", async () => {
+    it("does not treat idle session-only status as completed", async () => {
       const getMock = vi.fn().mockImplementation((path: string) => {
         if (path === "/session/status") return Promise.resolve({
-          "s1": { state: "idle" },
+          s1: { state: "idle" },
         });
         if (path.includes("/message")) return Promise.resolve([
           { info: { id: "m1", role: "assistant" }, parts: [{ type: "text", text: "Done!" }] },
         ]);
-        return Promise.resolve({});
+        return Promise.resolve([]);
       });
       const mockClient = createMockClient({ get: getMock });
       const tools = new Map<string, Function>();
@@ -1774,35 +1963,16 @@ describe("Tool handlers", () => {
       registerWorkflowTools(mockServer, mockClient);
 
       const handler = tools.get("opencode_wait")!;
-      const result = await handler({ sessionId: "s1", timeoutSeconds: 5, pollIntervalMs: 50 });
+      const result = await handler({ sessionId: "s1", timeoutSeconds: 1, pollIntervalMs: 50 });
       const text = result.content[0].text;
-      expect(text).toContain("Session completed");
-      expect(text).toContain("Done!");
-      expect(result.isError).toBeUndefined();
-    });
-
-    it("detects error from object status { state: 'error' }", async () => {
-      const getMock = vi.fn().mockResolvedValue({
-        "s1": { state: "error" },
-      });
-      const mockClient = createMockClient({ get: getMock });
-      const tools = new Map<string, Function>();
-      const mockServer = {
-        tool: vi.fn((...args: unknown[]) => {
-          tools.set(args[0] as string, args[args.length - 1] as Function);
-        }),
-      } as unknown as McpServer;
-      registerWorkflowTools(mockServer, mockClient);
-
-      const handler = tools.get("opencode_wait")!;
-      const result = await handler({ sessionId: "s1", timeoutSeconds: 5, pollIntervalMs: 50 });
-      expect(result.content[0].text).toContain("error status");
+      expect(text).not.toContain("Session completed");
+      expect(text).toMatch(/timed_out|untracked|do not claim/i);
       expect(result.isError).toBe(true);
     });
 
-    it("times out with actionable suggestions", async () => {
+    it("times out with nextAction to check, not resubmit", async () => {
       const getMock = vi.fn().mockResolvedValue({
-        "s1": { state: "running" },
+        s1: { state: "busy" },
       });
       const mockClient = createMockClient({ get: getMock });
       const tools = new Map<string, Function>();
@@ -1816,75 +1986,23 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_wait")!;
       const result = await handler({ sessionId: "s1", timeoutSeconds: 1, pollIntervalMs: 200 });
       const text = result.content[0].text;
-      expect(text).toContain("Timeout");
-      expect(text).toContain("opencode_conversation");
-      expect(text).toContain("opencode_session_abort");
+      expect(text).toMatch(/timed_out|Timeout|still/i);
+      expect(text).toMatch(/check|do not claim|do not submit/i);
       expect(result.isError).toBe(true);
-    });
-
-    it("completes when string status is 'idle'", async () => {
-      const getMock = vi.fn().mockImplementation((path: string) => {
-        if (path === "/session/status") return Promise.resolve({ "s1": "idle" });
-        if (path.includes("/message")) return Promise.resolve([
-          { info: { id: "m1", role: "assistant" }, parts: [{ type: "text", text: "Result" }] },
-        ]);
-        return Promise.resolve({});
-      });
-      const mockClient = createMockClient({ get: getMock });
-      const tools = new Map<string, Function>();
-      const mockServer = {
-        tool: vi.fn((...args: unknown[]) => {
-          tools.set(args[0] as string, args[args.length - 1] as Function);
-        }),
-      } as unknown as McpServer;
-      registerWorkflowTools(mockServer, mockClient);
-
-      const handler = tools.get("opencode_wait")!;
-      const result = await handler({ sessionId: "s1", timeoutSeconds: 5, pollIntervalMs: 50 });
-      expect(result.content[0].text).toContain("Session completed");
-    });
-
-    it("returns 'no messages' when completed but message list is empty", async () => {
-      const getMock = vi.fn().mockImplementation((path: string) => {
-        if (path === "/session/status") return Promise.resolve({ "s1": "completed" });
-        if (path.includes("/message")) return Promise.resolve([]);
-        return Promise.resolve({});
-      });
-      const mockClient = createMockClient({ get: getMock });
-      const tools = new Map<string, Function>();
-      const mockServer = {
-        tool: vi.fn((...args: unknown[]) => {
-          tools.set(args[0] as string, args[args.length - 1] as Function);
-        }),
-      } as unknown as McpServer;
-      registerWorkflowTools(mockServer, mockClient);
-
-      const handler = tools.get("opencode_wait")!;
-      const result = await handler({ sessionId: "s1", timeoutSeconds: 5, pollIntervalMs: 50 });
-      expect(result.content[0].text).toContain("no messages");
     });
   });
 
   describe("opencode_run", () => {
-    it("creates session, sends prompt, and polls until idle", async () => {
-      let pollCount = 0;
+    it("creates a session and submits via prompt_async (does not treat idle as done)", async () => {
       const mockClient = createMockClient({
         post: vi.fn().mockImplementation((path: string) => {
           if (path === "/session") return Promise.resolve({ id: "ses-run-1" });
-          return Promise.resolve({ parts: [{ type: "text", text: "Done building!" }] });
+          if (String(path).endsWith("/prompt_async")) return Promise.resolve(undefined);
+          throw new Error(`unexpected POST ${path}`);
         }),
         get: vi.fn().mockImplementation((path: string) => {
-          if (path === "/session/status") {
-            pollCount++;
-            // First poll: running, second poll: idle
-            return Promise.resolve({ "ses-run-1": pollCount >= 2 ? "idle" : "running" });
-          }
-          if (path.includes("/message")) return Promise.resolve([{ parts: [{ type: "text", text: "All tasks completed." }] }]);
-          if (path.includes("/todo")) return Promise.resolve([
-            { status: "completed", content: "Set up project" },
-            { status: "completed", content: "Write tests" },
-          ]);
-          return Promise.resolve({});
+          if (path === "/session/status") return Promise.resolve({ "ses-run-1": "idle" });
+          return Promise.resolve([]);
         }),
       });
       const tools = new Map<string, Function>();
@@ -1896,45 +2014,31 @@ describe("Tool handlers", () => {
       registerWorkflowTools(mockServer, mockClient);
 
       const handler = tools.get("opencode_run")!;
-      const result = await handler({ prompt: "Build app", providerID: "anthropic", modelID: "claude-opus-4-6" });
-      expect(result.content[0].text).toContain("ses-run-1");
-      expect(result.content[0].text).toContain("completed");
-      expect(result.content[0].text).toContain("2/2");
-    });
-
-    it("returns error status when session errors", async () => {
-      const mockClient = createMockClient({
-        post: vi.fn().mockImplementation((path: string) => {
-          if (path === "/session") return Promise.resolve({ id: "ses-err" });
-          return Promise.resolve({});
-        }),
-        get: vi.fn().mockImplementation((path: string) => {
-          if (path === "/session/status") return Promise.resolve({ "ses-err": "error" });
-          return Promise.resolve({});
-        }),
+      const result = await handler({
+        prompt: "Build app",
+        providerID: "anthropic",
+        modelID: "claude-opus-4-6",
+        maxDurationSeconds: 1,
       });
-      const tools = new Map<string, Function>();
-      const mockServer = {
-        tool: vi.fn((...args: unknown[]) => {
-          tools.set(args[0] as string, args[args.length - 1] as Function);
-        }),
-      } as unknown as McpServer;
-      registerWorkflowTools(mockServer, mockClient);
-
-      const handler = tools.get("opencode_run")!;
-      const result = await handler({ prompt: "Bad task", maxDurationSeconds: 1 });
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("error");
+      const text = result.content[0].text;
+      expect(text).toContain("ses-run-1");
+      expect(text).toMatch(/job_/);
+      expect(text).not.toMatch(/Done!/);
+      const postMock = mockClient.post as ReturnType<typeof vi.fn>;
+      expect(postMock.mock.calls.some((c: unknown[]) => String(c[0]).endsWith("/prompt_async"))).toBe(true);
+      expect(postMock.mock.calls.some((c: unknown[]) => String(c[0]) === "/session/ses-run-1/message")).toBe(false);
     });
 
     it("reuses existing session when sessionId provided", async () => {
       const mockClient = createMockClient({
-        post: vi.fn().mockResolvedValue({}),
+        post: vi.fn().mockImplementation((path: string) => {
+          if (String(path).endsWith("/prompt_async")) return Promise.resolve(undefined);
+          throw new Error(`unexpected POST ${path}`);
+        }),
         get: vi.fn().mockImplementation((path: string) => {
+          if (path === "/session/existing-ses") return Promise.resolve({ id: "existing-ses" });
           if (path === "/session/status") return Promise.resolve({ "existing-ses": "idle" });
-          if (path.includes("/message")) return Promise.resolve([{ parts: [{ type: "text", text: "Done" }] }]);
-          if (path.includes("/todo")) return Promise.resolve([]);
-          return Promise.resolve({});
+          return Promise.resolve([]);
         }),
       });
       const tools = new Map<string, Function>();
@@ -1946,8 +2050,11 @@ describe("Tool handlers", () => {
       registerWorkflowTools(mockServer, mockClient);
 
       const handler = tools.get("opencode_run")!;
-      const result = await handler({ prompt: "Continue work", sessionId: "existing-ses" });
-      // Should NOT call POST /session to create a new one
+      const result = await handler({
+        prompt: "Continue work",
+        sessionId: "existing-ses",
+        maxDurationSeconds: 1,
+      });
       const postMock = mockClient.post as ReturnType<typeof vi.fn>;
       const sessionCreateCalls = postMock.mock.calls.filter((c: unknown[]) => c[0] === "/session");
       expect(sessionCreateCalls.length).toBe(0);
@@ -1956,11 +2063,12 @@ describe("Tool handlers", () => {
   });
 
   describe("opencode_fire", () => {
-    it("creates session and returns immediately with monitoring instructions", async () => {
+    it("creates session and returns immediately with a jobId", async () => {
       const mockClient = createMockClient({
         post: vi.fn().mockImplementation((path: string) => {
           if (path === "/session") return Promise.resolve({ id: "ses-fire-1" });
-          return Promise.resolve({});
+          if (String(path).endsWith("/prompt_async")) return Promise.resolve(undefined);
+          throw new Error(`unexpected POST ${path}`);
         }),
       });
       const tools = new Map<string, Function>();
@@ -1974,13 +2082,21 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_fire")!;
       const result = await handler({ prompt: "Build everything", providerID: "anthropic", modelID: "claude-opus-4-6" });
       expect(result.content[0].text).toContain("ses-fire-1");
+      expect(result.content[0].text).toMatch(/job_/);
       expect(result.content[0].text).toContain("dispatched");
       expect(result.content[0].text).toContain("opencode_check");
+      const postMock = mockClient.post as ReturnType<typeof vi.fn>;
+      expect(postMock.mock.calls.some((c: unknown[]) => String(c[0]).endsWith("/prompt_async"))).toBe(true);
+      expect(postMock.mock.calls.some((c: unknown[]) => String(c[0]) === "/session/ses-fire-1/message")).toBe(false);
     });
 
     it("reuses existing session when sessionId provided", async () => {
       const mockClient = createMockClient({
-        post: vi.fn().mockResolvedValue({}),
+        post: vi.fn().mockImplementation((path: string) => {
+          if (String(path).endsWith("/prompt_async")) return Promise.resolve(undefined);
+          throw new Error(`unexpected POST ${path}`);
+        }),
+        get: vi.fn().mockResolvedValue({ id: "ses-existing" }),
       });
       const tools = new Map<string, Function>();
       const mockServer = {
@@ -2003,7 +2119,7 @@ describe("Tool handlers", () => {
     it("returns compact progress report with status and todos", async () => {
       const mockClient = createMockClient({
         get: vi.fn().mockImplementation((path: string) => {
-          if (path === "/session/status") return Promise.resolve({ "ses-chk": { state: "running" } });
+          if (path === "/session/status") return Promise.resolve({ "ses-chk": { state: "busy" } });
           if (path.includes("/todo")) return Promise.resolve([
             { status: "completed", content: "Setup" },
             { status: "in_progress", content: "Build UI" },
@@ -2011,7 +2127,8 @@ describe("Tool handlers", () => {
           ]);
           if (path.includes("/diff")) return Promise.resolve([{ path: "src/App.tsx" }, { path: "src/index.ts" }]);
           if (path === "/session/ses-chk") return Promise.resolve({ title: "Build App", id: "ses-chk" });
-          return Promise.resolve({});
+          if (path === "/permission" || path === "/question") return Promise.resolve([]);
+          return Promise.resolve([]);
         }),
       });
       const tools = new Map<string, Function>();
@@ -2031,16 +2148,17 @@ describe("Tool handlers", () => {
       expect(text).toContain("1 in progress");
       expect(text).toContain("Build UI"); // current task
       expect(text).toContain("Files changed: 2");
+      expect(text).not.toMatch(/Done!/);
     });
 
-    it("shows completion message when session is idle", async () => {
+    it("does not treat idle session-only status as Done", async () => {
       const mockClient = createMockClient({
         get: vi.fn().mockImplementation((path: string) => {
           if (path === "/session/status") return Promise.resolve({ "ses-done": "idle" });
           if (path.includes("/todo")) return Promise.resolve([]);
           if (path.includes("/diff")) return Promise.resolve([]);
           if (path === "/session/ses-done") return Promise.resolve({ title: "Finished", id: "ses-done" });
-          return Promise.resolve({});
+          return Promise.resolve([]);
         }),
       });
       const tools = new Map<string, Function>();
@@ -2054,9 +2172,8 @@ describe("Tool handlers", () => {
       const handler = tools.get("opencode_check")!;
       const result = await handler({ sessionId: "ses-done" });
       const text = result.content[0].text;
-      expect(text).toContain("idle");
-      expect(text).toContain("Done!");
-      expect(text).toContain("opencode_review_changes");
+      expect(text).not.toContain("Done!");
+      expect(text).toMatch(/untracked|do not claim/i);
     });
 
     it("includes last message when detailed=true", async () => {
@@ -2222,7 +2339,7 @@ describe("Tool handlers", () => {
       // the point is we get a clear error, not UNREACHABLE.
       const result = await handler({ directory: "./nonexistent-dir" });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("does not exist");
+      expect(result.content[0].text).toMatch(/absolute path|relative paths/i);
       expect(result.content[0].text).not.toContain("UNREACHABLE");
     });
 

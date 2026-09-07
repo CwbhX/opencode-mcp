@@ -157,15 +157,16 @@ Steps:
             text: `# OpenCode MCP Best Practices
 
 ## 1. First-Time Setup
+- Prefer a separately managed \`opencode serve\`, then attach with \`OPENCODE_AUTO_SERVE=false\`.
 - Always start with \`opencode_setup\` to check server health and see available providers.
 - Pick a provider from the **Ready to use** list, then call \`opencode_provider_models\` to see its models.
-- Test a provider with \`opencode_provider_test\` if you're unsure it's working.
+- Test a provider with \`opencode_provider_test\` if you're unsure it's working. A discovered default is still subject to \`OPENCODE_ALLOWED_MODELS\`.
 
 ## 2. Always Specify Provider and Model
-CRITICAL: When calling \`opencode_ask\`, \`opencode_reply\`, \`opencode_message_send\`, or \`opencode_message_send_async\`, ALWAYS pass \`providerID\` and \`modelID\`. Without these, the agent may select a default model that returns empty responses. Use providers discovered via \`opencode_setup\` — do NOT hardcode any specific provider.
+CRITICAL: When calling \`opencode_ask\`, \`opencode_reply\`, \`opencode_run\`, \`opencode_fire\`, or \`opencode_message_send\`, pass **both** \`providerID\` and \`modelID\`. A single identifier is rejected and is not merged with defaults. Empty strings are invalid. Use providers discovered via \`opencode_setup\` — do NOT invent a paid fallback.
 
 Good: \`opencode_ask({prompt: "...", providerID: "<your-provider>", modelID: "<your-model>"})\`
-Bad: \`opencode_ask({prompt: "..."})\`
+Bad: \`opencode_ask({prompt: "..."})\` when an allowlist or explicit-model mode is configured.
 
 ## 3. Choosing the Right Tool
 
@@ -173,9 +174,9 @@ Bad: \`opencode_ask({prompt: "..."})\`
 |------|------|-----|
 | Quick question | \`opencode_ask\` | One call, creates session + gets response |
 | Multi-turn conversation | \`opencode_ask\` then \`opencode_reply\` | Builds on existing session |
-| Complex build task (< 10 min) | \`opencode_run\` | One call, creates session + polls until done |
-| Very long task (10+ min) | \`opencode_fire\` + \`opencode_check\` | Fire-and-forget with cheap progress checks |
-| Monitor a running session | \`opencode_check\` | Status, todos, file counts in one call |
+| Complex build task | \`opencode_run\` | Submit via \`/prompt_async\` and wait on the handle |
+| Background task | \`opencode_fire\` then \`opencode_check\` / \`opencode_wait\` | Fire returns an accepted handle, not a completed answer |
+| Monitor a running session | \`opencode_check\` | Status, todos, file counts; idle is not Done |
 
 ## 4. Writing Good Prompts for OpenCode
 The agent works best with structured, specific prompts:
@@ -186,28 +187,34 @@ The agent works best with structured, specific prompts:
 - Say "Run npm run build and fix any errors" at the end
 
 ## 5. Monitoring Long-Running Tasks
-- \`opencode_check\` — quick progress report: status, todos, file counts (cheapest)
+- \`opencode_fire\` is accepted dispatch (HTTP 204). The model may still be running.
+- \`opencode_check\` — progress from the handle (\`jobId\`, or \`sessionId\` + \`requestMessageID\` + \`directory\`)
+- \`opencode_wait\` — block until terminal, blocked, or timed out. Timeout does not abort server work.
 - \`opencode_session_todo\` — see the agent's internal checklist
-- \`opencode_wait\` — block until done, but has a timeout
-- \`opencode_conversation\` — see full message history (expensive, lots of tokens)
-- \`opencode_review_changes\` — see all file diffs (use after task completes)
+- \`opencode_conversation\` — full history (expensive)
+- \`opencode_review_changes\` — file diffs after a terminal result
+- If this MCP process exits, in-memory \`jobId\` is gone. Recover with the session/message/directory tuple.
 
 ## 6. Error Recovery
-- If a session fails, use \`opencode_reply\` to give the agent the error and ask it to fix
-- If the server is unreachable, call \`opencode_setup\` to diagnose
-- If auth fails, use \`opencode_auth_set\` to update API keys
-- If a session is stuck, use \`opencode_session_abort\` then retry
+- Ordinary model text containing "error" is not an auth failure. Typed \`info.error\` is a failure.
+- HTTP 401 on the OpenCode server is Basic-auth (credentials), not "switch models."
+- Provider auth failure is distinct; use \`opencode_auth_set\` or the provider's login flow for that provider only. Do not substitute another model.
+- Permission and question blocks are blocked results. Reply explicitly. Do not set global \`permission: allow\`.
+- If a session fails, use \`opencode_reply\` with the error and ask it to fix.
+- If the server is unreachable, call \`opencode_setup\` to diagnose.
+- Do not resend a prompt when acceptance is unknown (\`safeToResubmit: false\`).
 
 ## 7. Tool Annotations
 Tools are annotated with behavior hints:
-- \`readOnlyHint: true\` — safe, doesn't change anything (setup, status, find, review)
+- \`readOnlyHint: true\` — metadata only; not a filesystem sandbox
 - \`destructiveHint: true\` — permanently deletes data (session_delete, instance_dispose)
 - No annotation — has side effects but is not destructive (ask, reply, send messages)
 
 ## 8. Common Pitfalls
+- Don't treat idle session status or a missing status entry as Done
 - Don't call \`opencode_conversation\` on active sessions — it's expensive and the response is still being generated
 - Don't create new sessions for each message — use \`opencode_reply\` to continue existing ones
-- Don't forget the \`directory\` parameter when working with multiple projects
+- Don't forget the \`directory\` parameter when working with multiple projects; it must be an existing absolute path
 - Don't call \`opencode_instance_dispose\` unless you really want to shut down the server`,
           },
         },

@@ -5,11 +5,62 @@ import {
   toolResult,
   toolError,
   formatMessageResponse,
-  analyzeMessageResponse,
   formatMessageList,
-  applyModelDefaults,
   directoryParam,
 } from "../helpers.js";
+import {
+  buildCommandBody,
+  buildPromptBody,
+  buildShellBody,
+  resolveConfiguredModel,
+} from "../model-selection.js";
+import {
+  assertSessionDirectory,
+  createDeadline,
+  validateDirectory,
+} from "../request-context.js";
+import { fireToolIsError, formatTaskResult } from "../task-result-format.js";
+import { getSharedTaskManager } from "../task-manager.js";
+import { analyzeTypedMessage } from "../typed-outcome.js";
+
+const ASYNC_SUBMIT_BUDGET_MS = 60_000;
+
+function resolveToolModel(providerID?: string, modelID?: string) {
+  return resolveConfiguredModel({ providerID, modelID });
+}
+
+function sessionDirectoryOf(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const directory = (payload as { directory?: unknown }).directory;
+  return typeof directory === "string" ? directory : undefined;
+}
+
+async function assertExistingSessionDirectory(
+  client: OpenCodeClient,
+  sessionId: string,
+  directory: string | undefined,
+): Promise<string | undefined> {
+  const requested = validateDirectory(directory);
+  if (!requested) return undefined;
+  const session = await client.get(`/session/${sessionId}`, undefined, requested);
+  assertSessionDirectory({
+    requestedDirectory: requested,
+    sessionDirectory: sessionDirectoryOf(session),
+  });
+  return requested;
+}
+
+function formatAsyncHandle(result: import("../bridge-types.js").TaskResult): string {
+  const line =
+    result.state === "failed" || result.state === "aborted"
+      ? `Async send ended in ${result.state} (submissionState=${result.submissionState}).`
+      : result.submissionState === "accepted"
+        ? "Message accepted asynchronously. Use opencode_wait or opencode_check to monitor this job."
+        : result.submissionState === "unknown"
+          ? "Message acceptance is unknown, not a known rejection. Inspect the handle; do not resend automatically."
+          : `Message was not accepted (submissionState=${result.submissionState}). Inspect the handle before retrying.`;
+  return formatTaskResult(line, result);
+}
 
 export function registerMessageTools(
   server: McpServer,
@@ -101,21 +152,45 @@ export function registerMessageTools(
       directory,
     }) => {
       try {
-        const body: Record<string, unknown> = {
-          parts: [{ type: "text", text }],
-        };
-        const model = applyModelDefaults(providerID, modelID, variant);
-        if (model) body.model = model;
-        if (agent) body.agent = agent;
-        if (noReply !== undefined) body.noReply = noReply;
-        if (system) body.system = system;
-        const response = await client.post(
-          `/session/${sessionId}/message`,
-          body,
-          { directory },
+        const model = resolveToolModel(providerID, modelID);
+        const scoped = await assertExistingSessionDirectory(
+          client,
+          sessionId,
+          directory,
         );
+        const manager = getSharedTaskManager(client);
+        if (noReply === true) {
+          manager.assertSessionTurnAvailable(sessionId, scoped);
+        }
+        const body = buildPromptBody({
+          prompt: text,
+          model,
+          variant,
+          agent,
+          system,
+          noReply,
+        });
+        const post = () =>
+          client.post(`/session/${sessionId}/message`, body, { directory: scoped });
+        const response = noReply === true
+          ? await post()
+          : await manager.withSessionTurn({ sessionId, directory: scoped }, post);
 
-        const analysis = analyzeMessageResponse(response);
+        if (noReply === true) {
+          const analysis = analyzeTypedMessage(response);
+          const formatted = formatMessageResponse(response);
+          const ack =
+            "noReply context injection acknowledged; this is not a generated-task result.";
+          if (analysis.hasError) {
+            return toolResult(
+              `${ack}\n\n${analysis.warning ?? formatted}`,
+              true,
+            );
+          }
+          return toolResult(formatted ? `${ack}\n\n${formatted}` : ack);
+        }
+
+        const analysis = analyzeTypedMessage(response);
         const formatted = formatMessageResponse(response);
         const parts: string[] = [];
         if (formatted) parts.push(formatted);
@@ -123,7 +198,10 @@ export function registerMessageTools(
           parts.push(`\n--- WARNING ---\n${analysis.warning}`);
         }
         return toolResult(
-          parts.join("\n\n") || "Empty response.",
+          parts.join("\n\n") ||
+            (analysis.hasNonTextContent
+              ? "Completed with non-text output; this is not an authentication failure."
+              : "Empty response."),
           analysis.hasError,
         );
       } catch (e) {
@@ -150,18 +228,22 @@ export function registerMessageTools(
       agent: z.string().optional().describe("Agent to use"),
       directory: directoryParam,
     },
-    async ({ sessionId, text, providerID, modelID, variant, agent, directory }) => {
+    async ({ sessionId, text, providerID, modelID, variant, agent, directory }, extra) => {
       try {
-        const body: Record<string, unknown> = {
-          parts: [{ type: "text", text }],
-        };
-        const model = applyModelDefaults(providerID, modelID, variant);
-        if (model) body.model = model;
-        if (agent) body.agent = agent;
-        await client.post(`/session/${sessionId}/prompt_async`, body, { directory });
-        return toolResult(
-          "Message sent asynchronously. Use opencode_wait or opencode_message_list to check for responses.",
-        );
+        resolveToolModel(providerID, modelID);
+        const scoped = validateDirectory(directory);
+        const handle = await getSharedTaskManager(client).submitAsync({
+          prompt: text,
+          sessionId,
+          providerID,
+          modelID,
+          variant,
+          agent,
+          directory: scoped,
+          deadlineAt: createDeadline(ASYNC_SUBMIT_BUDGET_MS),
+          signal: extra?.signal,
+        });
+        return toolResult(formatAsyncHandle(handle), fireToolIsError(handle));
       } catch (e) {
         return toolError(e);
       }
@@ -197,17 +279,23 @@ export function registerMessageTools(
       directory,
     }) => {
       try {
-        const body: Record<string, unknown> = {
+        const model = resolveToolModel(providerID, modelID);
+        const scoped = await assertExistingSessionDirectory(
+          client,
+          sessionId,
+          directory,
+        );
+        const body = buildCommandBody({
           command,
-          arguments: args ?? "",
-        };
-        if (agent) body.agent = agent;
-        const cmdModel = applyModelDefaults(providerID, modelID, variant);
-        if (cmdModel) body.model = cmdModel;
-        const result = await client.post(
-          `/session/${sessionId}/command`,
-          body,
-          { directory },
+          arguments: args,
+          model,
+          variant,
+          agent,
+        });
+        const result = await getSharedTaskManager(client).withSessionTurn(
+          { sessionId, directory: scoped },
+          () =>
+            client.post(`/session/${sessionId}/command`, body, { directory: scoped }),
         );
         return toolResult(formatMessageResponse(result));
       } catch (e) {
@@ -230,13 +318,17 @@ export function registerMessageTools(
     },
     async ({ sessionId, command, agent, providerID, modelID, variant, directory }) => {
       try {
-        const body: Record<string, unknown> = { command, agent };
-        const shellModel = applyModelDefaults(providerID, modelID, variant);
-        if (shellModel) body.model = shellModel;
-        const result = await client.post(
-          `/session/${sessionId}/shell`,
-          body,
-          { directory },
+        const model = resolveToolModel(providerID, modelID);
+        const body = buildShellBody({ command, agent, model, variant });
+        const scoped = await assertExistingSessionDirectory(
+          client,
+          sessionId,
+          directory,
+        );
+        const result = await getSharedTaskManager(client).withSessionTurn(
+          { sessionId, directory: scoped },
+          () =>
+            client.post(`/session/${sessionId}/shell`, body, { directory: scoped }),
         );
         return toolResult(formatMessageResponse(result));
       } catch (e) {

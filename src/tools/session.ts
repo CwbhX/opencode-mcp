@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OpenCodeClient } from "../client.js";
-import { toolError, formatSessionList, formatDiffResponse, resolveSessionStatus, toolResult, directoryParam, destructive, readOnly } from "../helpers.js";
+import { AmbiguousAcceptanceError, OpenCodeError } from "../http-transport.js";
+import { toolError, formatSessionList, formatDiffResponse, toolResult, directoryParam, destructive, readOnly } from "../helpers.js";
+import { buildInitBody, buildSummarizeBody, resolveConfiguredModel } from "../model-selection.js";
+import { assertSessionDirectory, validateDirectory } from "../request-context.js";
+import { getSharedTaskManager } from "../task-manager.js";
+import { normalizeRawSessionState } from "../task-status.js";
 
 /** Format a single session object into a compact human-readable summary. */
 function formatSession(raw: unknown): string {
@@ -35,6 +40,42 @@ function formatSession(raw: unknown): string {
     if (text) lines.push(`Summary: ${String(text).slice(0, 200)}`);
   }
   return lines.length > 0 ? lines.join("\n") : JSON.stringify(raw);
+}
+
+function sessionDirectoryOf(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const directory = (payload as { directory?: unknown }).directory;
+  return typeof directory === "string" ? directory : undefined;
+}
+
+async function scopedSessionDirectory(
+  client: OpenCodeClient,
+  sessionId: string,
+  directory: string | undefined,
+): Promise<string | undefined> {
+  const requested = validateDirectory(directory);
+  if (!requested) return undefined;
+  const session = await client.get(`/session/${sessionId}`, undefined, requested);
+  assertSessionDirectory({
+    requestedDirectory: requested,
+    sessionDirectory: sessionDirectoryOf(session),
+  });
+  return requested;
+}
+
+function isUnambiguousPermissionRouteMissing(
+  error: unknown,
+  permissionID: string,
+): boolean {
+  if (error instanceof AmbiguousAcceptanceError) return false;
+  if (!(error instanceof OpenCodeError)) return false;
+  if (error.status !== 404) return false;
+  const expectedPath = `/permission/${permissionID}/reply`;
+  if (error.path !== expectedPath) return false;
+  const body = error.body.toLowerCase();
+  const pathLower = expectedPath.toLowerCase();
+  if (!body.includes(pathLower)) return false;
+  return body.includes("not found") || body.includes("cannot post");
 }
 
 export function registerSessionTools(
@@ -107,7 +148,8 @@ export function registerSessionTools(
     destructive,
     async ({ id, directory }) => {
       try {
-        await client.delete(`/session/${id}`, undefined, directory);
+        const scoped = await scopedSessionDirectory(client, id, directory);
+        await client.delete(`/session/${id}`, undefined, scoped);
         return toolResult(`Session ${id} deleted.`);
       } catch (e) {
         return toolError(e);
@@ -125,9 +167,10 @@ export function registerSessionTools(
     },
     async ({ id, title, directory }) => {
       try {
+        const scoped = await scopedSessionDirectory(client, id, directory);
         const body: Record<string, string> = {};
         if (title !== undefined) body.title = title;
-        const updated = await client.patch(`/session/${id}`, body, directory);
+        const updated = await client.patch(`/session/${id}`, body, scoped);
         return toolResult(formatSession(updated));
       } catch (e) {
         return toolError(e);
@@ -165,15 +208,20 @@ export function registerSessionTools(
     readOnly,
     async ({ directory }) => {
       try {
-        const raw = await client.get("/session/status", undefined, directory);
+        const scoped = directory !== undefined ? validateDirectory(directory) : undefined;
+        const raw = await client.get("/session/status", undefined, scoped);
         const statuses = raw && typeof raw === "object" && !Array.isArray(raw)
           ? raw as Record<string, unknown>
           : {};
         const entries = Object.entries(statuses);
         if (entries.length === 0) {
-          return toolResult("All sessions idle.");
+          return toolResult(
+            "No sessions reported active. Status map empty (idle entries are omitted).",
+          );
         }
-        const lines = entries.map(([id, status]) => `- ${id}: ${resolveSessionStatus(status)}`);
+        const lines = entries.map(
+          ([id, status]) => `- ${id}: ${normalizeRawSessionState(status)}`,
+        );
         return toolResult(`## Session Status (${entries.length})\n${lines.join("\n")}`);
       } catch (e) {
         return toolError(e);
@@ -224,7 +272,23 @@ export function registerSessionTools(
     },
     async ({ id, messageID, providerID, modelID, variant, directory }) => {
       try {
-        await client.post(`/session/${id}/init`, { messageID, providerID, modelID, variant }, { directory });
+        const model = resolveConfiguredModel({ providerID, modelID });
+        if (!model) {
+          throw new Error(
+            "init requires a policy-checked providerID/modelID pair; server-default selection is not used.",
+          );
+        }
+        const scoped = await scopedSessionDirectory(client, id, directory);
+        const body = buildInitBody({
+          messageID,
+          providerID: model.providerID,
+          modelID: model.modelID,
+          variant,
+        });
+        await getSharedTaskManager(client).withSessionTurn(
+          { sessionId: id, directory: scoped },
+          () => client.post(`/session/${id}/init`, body, { directory: scoped }),
+        );
         return toolResult("AGENTS.md initialization started.");
       } catch (e) {
         return toolError(e);
@@ -241,8 +305,11 @@ export function registerSessionTools(
     },
     async ({ id, directory }) => {
       try {
-        await client.post(`/session/${id}/abort`, undefined, { directory });
-        return toolResult(`Session ${id} aborted.`);
+        const scoped = await scopedSessionDirectory(client, id, directory);
+        await client.post(`/session/${id}/abort`, undefined, { directory: scoped });
+        return toolResult(
+          `Abort request accepted for session ${id}. This is a session-wide abort. A specific job was not checked.`,
+        );
       } catch (e) {
         return toolError(e);
       }
@@ -259,9 +326,10 @@ export function registerSessionTools(
     },
     async ({ id, messageID, directory }) => {
       try {
+        const scoped = await scopedSessionDirectory(client, id, directory);
         const body: Record<string, string> = {};
         if (messageID) body.messageID = messageID;
-        const forked = await client.post(`/session/${id}/fork`, body, { directory });
+        const forked = await client.post(`/session/${id}/fork`, body, { directory: scoped });
         return toolResult(`Session forked.\n\n${formatSession(forked)}`);
       } catch (e) {
         return toolError(e);
@@ -278,7 +346,8 @@ export function registerSessionTools(
     },
     async ({ id, directory }) => {
       try {
-        const result = await client.post(`/session/${id}/share`, undefined, { directory });
+        const scoped = await scopedSessionDirectory(client, id, directory);
+        const result = await client.post(`/session/${id}/share`, undefined, { directory: scoped });
         const r = result as Record<string, unknown>;
         // API may return share URL in different locations
         const shareUrl = r.shareUrl ?? (r.share as Record<string, unknown> | undefined)?.url ?? null;
@@ -299,7 +368,8 @@ export function registerSessionTools(
     },
     async ({ id, directory }) => {
       try {
-        await client.delete(`/session/${id}/share`, undefined, directory);
+        const scoped = await scopedSessionDirectory(client, id, directory);
+        await client.delete(`/session/${id}/share`, undefined, scoped);
         return toolResult(`Session ${id} unshared.`);
       } catch (e) {
         return toolError(e);
@@ -339,7 +409,22 @@ export function registerSessionTools(
     },
     async ({ id, providerID, modelID, variant, directory }) => {
       try {
-        await client.post(`/session/${id}/summarize`, { providerID, modelID, variant }, { directory });
+        const model = resolveConfiguredModel({ providerID, modelID });
+        if (!model) {
+          throw new Error(
+            "summarize requires a policy-checked providerID/modelID pair; server-default selection is not used.",
+          );
+        }
+        const body = buildSummarizeBody({
+          providerID: model.providerID,
+          modelID: model.modelID,
+          variant,
+        });
+        const scoped = await scopedSessionDirectory(client, id, directory);
+        await getSharedTaskManager(client).withSessionTurn(
+          { sessionId: id, directory: scoped },
+          () => client.post(`/session/${id}/summarize`, body, { directory: scoped }),
+        );
         return toolResult("Session summarization started.");
       } catch (e) {
         return toolError(e);
@@ -358,9 +443,10 @@ export function registerSessionTools(
     },
     async ({ id, messageID, partID, directory }) => {
       try {
+        const scoped = await scopedSessionDirectory(client, id, directory);
         const body: Record<string, string> = { messageID };
         if (partID) body.partID = partID;
-        await client.post(`/session/${id}/revert`, body, { directory });
+        await client.post(`/session/${id}/revert`, body, { directory: scoped });
         return toolResult(`Message ${messageID} reverted.`);
       } catch (e) {
         return toolError(e);
@@ -377,7 +463,8 @@ export function registerSessionTools(
     },
     async ({ id, directory }) => {
       try {
-        await client.post(`/session/${id}/unrevert`, undefined, { directory });
+        const scoped = await scopedSessionDirectory(client, id, directory);
+        await client.post(`/session/${id}/unrevert`, undefined, { directory: scoped });
         return toolResult("All reverted messages restored.");
       } catch (e) {
         return toolError(e);
@@ -439,13 +526,19 @@ export function registerSessionTools(
     },
     async ({ id, permissionID, reply, directory }) => {
       try {
-        // Try the new API first (POST /permission/{requestID}/reply)
+        const scoped = await scopedSessionDirectory(client, id, directory);
         try {
-          await client.post(`/permission/${permissionID}/reply`, { reply }, { directory });
+          await client.post(`/permission/${permissionID}/reply`, { reply }, { directory: scoped });
           return toolResult(`Permission ${reply === "reject" ? "rejected" : "approved"} (${reply}).`);
-        } catch {
-          // Fall back to the deprecated session-scoped endpoint
-          await client.post(`/session/${id}/permissions/${permissionID}`, { response: reply }, { directory });
+        } catch (error) {
+          if (!isUnambiguousPermissionRouteMissing(error, permissionID)) {
+            throw error;
+          }
+          await client.post(
+            `/session/${id}/permissions/${permissionID}`,
+            { response: reply },
+            { directory: scoped },
+          );
           return toolResult(`Permission ${reply === "reject" ? "rejected" : "approved"} (${reply}).`);
         }
       } catch (e) {

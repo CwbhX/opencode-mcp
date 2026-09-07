@@ -1,21 +1,32 @@
 # Tools Reference
 
-Complete reference for all 80 tools provided by opencode-mcp.
+Registered surface: **83 tools** (13 workflow + 3 question + 67 other).
+See [compatibility.md](compatibility.md) for endpoints, test IDs, and
+limitations.
 
-Every tool accepts an optional `directory` parameter (absolute path) to target a specific project. All tools include [MCP tool annotations](https://modelcontextprotocol.io/docs/concepts/tools#tool-annotations) (`readOnlyHint`, `destructiveHint`) so clients can make informed decisions about tool safety.
+Every tool accepts an optional `directory` parameter. It must be an
+**absolute existing directory**. `~` and relative paths are rejected. When
+omitted, OpenCode uses its own project context — not this MCP process's cwd.
+All tools include [MCP tool annotations](https://modelcontextprotocol.io/docs/concepts/tools#tool-annotations)
+(`readOnlyHint`, `destructiveHint`). `readOnlyHint` is **not** a sandbox.
+
+Pass both `providerID` and `modelID`, or configure both
+`OPENCODE_DEFAULT_PROVIDER` and `OPENCODE_DEFAULT_MODEL`. A single identifier
+is rejected. There is no paid-model fallback.
 
 ## Table of Contents
 
 - [Workflow Tools (13)](#workflow-tools) — start here
 - [Session Tools (20)](#session-tools)
 - [Message Tools (6)](#message-tools)
+- [Question Tools (3)](#question-tools)
 - [File & Search Tools (6)](#file--search-tools)
 - [Config Tools (3)](#config-tools)
 - [Provider & Auth Tools (6)](#provider--auth-tools)
-- [TUI Control Tools (9)](#tui-control-tools)
+- [TUI Control Tools (9)](#tui-control-tools) — need an attached TUI
 - [System & Monitoring Tools (12)](#system--monitoring-tools)
 - [Event Tools (1)](#event-tools)
-- [Project Tools (2)](#project-tools)
+- [Project Tools (3)](#project-tools)
 - [Global Tools (1)](#global-tools)
 
 ---
@@ -44,8 +55,10 @@ One-shot interaction — creates a session, sends a prompt, returns the AI respo
 | `title` | string | no | Session title |
 | `providerID` | string | no | Provider (e.g. `"anthropic"`) |
 | `modelID` | string | no | Model (e.g. `"claude-opus-4-6"`) |
-| `agent` | string | no | Agent (e.g. `"build"`, `"plan"`) |
+| `agent` | string | no | Agent (e.g. `"build"`, `"plan"`). `plan` is not a write sandbox. |
 | `system` | string | no | System prompt override |
+| `variant` | string | no | Top-level model variant (not nested inside `model`) |
+| `directory` | string | no | Absolute existing project directory |
 
 ---
 
@@ -57,23 +70,28 @@ Follow-up message in an existing session.
 |---|---|---|---|
 | `sessionId` | string | yes | Session ID |
 | `prompt` | string | yes | The follow-up message |
-| `providerID` | string | no | Provider ID |
-| `modelID` | string | no | Model ID |
+| `providerID` | string | no | Provider ID (must pair with `modelID`) |
+| `modelID` | string | no | Model ID (must pair with `providerID`) |
+| `variant` | string | no | Top-level model variant |
 | `agent` | string | no | Agent to use |
 
 ---
 
 ### `opencode_run`
 
-**Send a task and wait for completion.** Combines session creation, async prompt dispatch, and polling into one call. Best for tasks you want to wait on (up to 10 minutes by default).
+Submit via `POST /session/{id}/prompt_async` and wait on the returned job
+handle. One deadline covers create + submit + wait. A **204** means dispatch
+accepted, not that the task succeeded. Idle or a missing status entry is
+**not Done**. Timeout does not abort server-side work.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `prompt` | string | yes | The task or instruction |
 | `sessionId` | string | no | Existing session to continue (omit to create new) |
 | `title` | string | no | Session title (new sessions only) |
-| `providerID` | string | no | Provider ID |
-| `modelID` | string | no | Model ID |
+| `providerID` | string | no | Provider ID (must pair with `modelID`) |
+| `modelID` | string | no | Model ID (must pair with `providerID`) |
+| `variant` | string | no | Top-level model variant |
 | `agent` | string | no | Agent to use |
 | `maxDurationSeconds` | number | no | Max wait time (default: 600 = 10 min) |
 
@@ -81,29 +99,38 @@ Follow-up message in an existing session.
 
 ### `opencode_fire`
 
-**Fire-and-forget** — dispatch a task and return immediately. OpenCode works autonomously in the background. Use `opencode_check` to monitor progress.
+**Accepted dispatch** — POST `/prompt_async` and return immediately when
+OpenCode accepts the turn (**HTTP 204**). This is not a completed answer.
+
+Returns a handle: `jobId`, `sessionId`, `requestMessageID`, `directory`.
+Pass that handle to `opencode_check` / `opencode_wait`. The job lives in
+this MCP process; it does **not** survive MCP exit.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `prompt` | string | yes | The task or instruction |
 | `sessionId` | string | no | Existing session to continue (omit to create new) |
 | `title` | string | no | Session title (new sessions only) |
-| `providerID` | string | no | Provider ID |
-| `modelID` | string | no | Model ID |
+| `providerID` | string | no | Provider ID (must pair with `modelID`) |
+| `modelID` | string | no | Model ID (must pair with `providerID`) |
+| `variant` | string | no | Top-level model variant |
 | `agent` | string | no | Agent to use |
-
-Returns: session ID + monitoring instructions.
 
 ---
 
 ### `opencode_check`
 
-**Compact progress report** for a running session. Returns status, todo progress (completed/total + current task), and file change count. Much cheaper than `opencode_conversation` or `opencode_wait`.
+Observe a job handle. Prefer `jobId` from `opencode_fire` / `opencode_run`.
+You can also recover with `sessionId` + `requestMessageID` + `directory`.
+A session-only check is **untracked** — idle is not Done.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `sessionId` | string | yes | Session ID to check |
+| `jobId` | string | no | Bridge job ID from fire/run |
+| `sessionId` | string | no | Session ID (use with `requestMessageID` to correlate) |
+| `requestMessageID` | string | no | Submitted user message ID |
 | `detailed` | boolean | no | Include last message text (default: false) |
+| `directory` | string | no | Absolute directory from the handle |
 
 ---
 
@@ -136,15 +163,20 @@ Full project context in one call: project info, path, VCS, config, agents.
 
 ### `opencode_wait`
 
-Poll a session until it finishes. Use after `opencode_message_send_async`. On timeout, returns actionable suggestions.
+Wait until a tracked job reaches a terminal, blocked, or timed-out state.
+Idle session status alone is not completion. Timeout does not abort
+server-side work; later `opencode_check` can still succeed.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `sessionId` | string | yes | Session ID |
-| `timeoutSeconds` | number | no | Max wait (default: 120) |
-| `pollIntervalMs` | number | no | Poll interval in ms (default: 2000) |
+| `jobId` | string | no | Bridge job ID from fire/run (preferred) |
+| `sessionId` | string | no | Session ID |
+| `requestMessageID` | string | no | Submitted user message ID |
+| `timeoutSeconds` | number | no | Max wait (default: 120, max: 3600) |
+| `pollIntervalMs` | number | no | Poll interval in ms (default: 250) |
+| `directory` | string | no | Absolute directory from the handle |
 
-> **Prefer `opencode_run`** for new tasks — it handles session creation + async send + polling in one call.
+> **Prefer `opencode_run`** for new tasks that you want to wait on.
 
 ---
 
@@ -161,12 +193,15 @@ Formatted diff summary of file changes in a session.
 
 ### `opencode_provider_test`
 
-Quick-test whether a provider works. Creates a temporary session, sends a trivial prompt, checks the response, cleans up.
+Quick-test whether a **named** provider works. Creates a temporary session,
+sends a trivial prompt, checks the response, cleans up. If `modelID` is
+omitted, uses that provider's listed default — never another provider's
+model, and never a paid fallback.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `providerId` | string | yes | Provider ID to test |
-| `modelID` | string | no | Model ID (defaults to provider default) |
+| `modelID` | string | no | Model ID on this provider |
 
 ---
 
@@ -202,8 +237,8 @@ Full lifecycle management of OpenCode sessions (20 tools).
 | `opencode_session_summarize` | `id`, `providerID`, `modelID` | AI-summarize (slow) |
 | `opencode_session_revert` | `id`, `messageID`, `partID?` | Revert a message |
 | `opencode_session_unrevert` | `id` | Restore reverted messages |
-| `opencode_session_permission` | `id`, `permissionID`, `reply` | Respond to a permission request (`once`, `always`, `reject`) |
-| `opencode_permission_list` | — | List all pending permission requests across sessions |
+| `opencode_session_permission` | `id`, `permissionID`, `reply` | Reply `once` / `always` / `reject`. Do not auto-approve to finish a wait. |
+| `opencode_permission_list` | — | List pending permission requests. No auto-approval. |
 
 ---
 
@@ -215,10 +250,24 @@ Send prompts and execute commands (6 tools).
 |---|---|---|
 | `opencode_message_list` | `sessionId`, `limit?` | List messages in a session |
 | `opencode_message_get` | `sessionId`, `messageId` | Get a specific message |
-| `opencode_message_send` | `sessionId`, `text`, `providerID?`, `modelID?` | Send prompt (sync, waits for response) |
-| `opencode_message_send_async` | `sessionId`, `text`, `providerID?`, `modelID?` | Send prompt (async, returns immediately) |
-| `opencode_command_execute` | `sessionId`, `command`, `arguments?` | Execute a slash command |
-| `opencode_shell_execute` | `sessionId`, `command`, `agent` | Run a shell command |
+| `opencode_message_send` | `sessionId`, `text`, `providerID?`, `modelID?`, `variant?` | Sync prompt; model is `{providerID, modelID}`, variant is top-level |
+| `opencode_message_send_async` | `sessionId`, `text`, `providerID?`, `modelID?`, `variant?` | `POST /prompt_async` (204 accepted); returns a job handle |
+| `opencode_command_execute` | `sessionId`, `command`, `arguments?`, `providerID?`, `modelID?` | Slash command; model is a `"provider/model"` string |
+| `opencode_shell_execute` | `sessionId`, `command`, `agent` | Shell; model object if provided; `variant` is rejected |
+
+---
+
+## Question Tools
+
+Pending user questions from the OpenCode agent (3 tools). Reply with
+selected-label arrays in question order. Do not invent answers to finish
+a wait.
+
+| Tool | Key Parameters | Description |
+|---|---|---|
+| `opencode_question_list` | — | List pending question requests |
+| `opencode_question_reply` | `requestID`, `answers` | `answers` is `string[][]` — one inner array of labels per question |
+| `opencode_question_reject` | `requestID` | Reject without answering |
 
 ---
 
@@ -266,7 +315,10 @@ Manage LLM providers and authentication (6 tools).
 
 ## TUI Control Tools
 
-Remote-control the OpenCode terminal UI (9 tools).
+Remote-control the OpenCode terminal UI (9 tools). These need an
+**attached TUI**. A headless `opencode serve` without a TUI will fail
+these calls. They are registered unconditionally so clients can discover
+them; treat them as conditional capabilities.
 
 | Tool | Key Parameters | Description |
 |---|---|---|

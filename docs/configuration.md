@@ -2,24 +2,33 @@
 
 ## Environment Variables
 
-All environment variables are **optional**. You only need to set them if you've changed the defaults on the OpenCode server side.
+Most variables are optional. You only need them if you changed the OpenCode
+server URL/auth, or you want a default / allowlisted model pair.
 
 | Variable | Description | Default | Required |
 |---|---|---|---|
 | `OPENCODE_BASE_URL` | URL of the OpenCode headless server | `http://127.0.0.1:4096` | No |
 | `OPENCODE_SERVER_USERNAME` | HTTP basic auth username | `opencode` | No |
 | `OPENCODE_SERVER_PASSWORD` | HTTP basic auth password | *(none — auth disabled)* | No |
-| `OPENCODE_AUTO_SERVE` | Auto-start `opencode serve` if not running | `true` | No |
-| `OPENCODE_DEFAULT_PROVIDER` | Default provider ID when not specified per-tool | *(none)* | No |
-| `OPENCODE_DEFAULT_MODEL` | Default model ID when not specified per-tool | *(none)* | No |
+| `OPENCODE_AUTO_SERVE` | Auto-start an SDK child on **loopback** only when the health probe is connection-refused. Generic `fetch failed` / 401 do not spawn. | `true` | No |
+| `OPENCODE_DEFAULT_PROVIDER` | Default provider ID when not specified per-tool | *(none)* | No (must pair with model) |
+| `OPENCODE_DEFAULT_MODEL` | Default model ID when not specified per-tool | *(none)* | No (must pair with provider) |
+| `OPENCODE_REQUIRE_EXPLICIT_MODEL` | When `true`, require an explicit or configured full provider/model pair | *(unset)* | No |
+| `OPENCODE_ALLOWED_MODELS` | JSON array of allowed `provider/model` strings | *(unset)* | No |
+| `OPENCODE_MCP_LIVE_TEST` | Set to `1` to run `npm run test:live`. Opt-in with missing URL/model config fails. | *(unset)* | Test only |
+| `OPENCODE_MCP_SERVER_TEST` | Set to `1` to enable Layer C tagged-server tests | *(unset)* | Test only |
+| `OPENCODE_MCP_SERVER_BINARY` | Absolute path to the OpenCode executable for Layer C (must report `1.18.29`) | *(unset)* | Test only |
 
 ### Notes
 
 - **Authentication is disabled by default.** It only activates when `OPENCODE_SERVER_PASSWORD` is set on both the OpenCode server and the MCP server.
 - **Username and password are both optional.** The default username is `opencode`, matching the OpenCode server's default. You only need to set these if you've explicitly enabled auth on the server.
 - **The base URL** should point to where `opencode serve` is listening. If running on the same machine with default settings, you don't need to set this.
-- **Default provider/model** are optional. When set, tools that accept `providerID`/`modelID` will use these as fallbacks when not specified per-call. Both must be set together. Example: `OPENCODE_DEFAULT_PROVIDER=anthropic` + `OPENCODE_DEFAULT_MODEL=claude-sonnet-4-5`.
-- **Directory validation** — The `directory` parameter on all tools must be an absolute path to an existing directory. Relative paths, non-existent paths, and trailing slashes are handled automatically (resolved or rejected with a helpful error).
+- **Default provider/model** are optional. When set, tools that accept `providerID`/`modelID` use this pair when the call omits both. A single identifier (caller or default) is **rejected** and is not merged with the other side. There is no paid-model fallback and no hardcoded free-model list. Discover current models with `opencode_setup` / `opencode_provider_list`.
+- **`OPENCODE_REQUIRE_EXPLICIT_MODEL=true`** fails the call unless a full pair is supplied on the tool or via the two default env vars.
+- **`OPENCODE_ALLOWED_MODELS`** must be a JSON array of strings such as `["opencode/muse-spark-1.3-contributor-free"]`. Other pairs are rejected before dispatch. A nonempty list cannot be bypassed by omitting the pair, and the first entry is not substituted for a different request. The list is a bridge policy; it does not lock OpenCode subagents, title generation, or config changed outside this process.
+- **Auto-start** treats only typed connection-refused on loopback as permission to spawn. Generic `fetch failed`, DNS, TLS, HTML, timeout, and HTTP 401/403 do not start another server.
+- **Directory validation** — `directory` must be an **absolute existing directory**. `~`, relative paths, files, control characters, and literal `%` path segments are rejected. Omitted `directory` uses the OpenCode server's project context, not this MCP process's cwd.
 
 ## MCP Client Configurations
 
@@ -200,39 +209,47 @@ Then use `opencode-mcp` directly in your config:
 }
 ```
 
-## Permissions (Headless Mode)
+## Permissions and questions
 
-In headless mode, OpenCode may pause sessions waiting for permission to use tools (file writes, shell commands, etc.). This blocks progress silently.
+In headless mode, OpenCode may pause a session for a **permission** (file
+write, shell, etc.) or a **user question**. That is a blocked result, not
+success. Do **not** set global `permission: "allow"` as the default
+workaround.
 
-**Recommended: Auto-allow all permissions** by adding to your `opencode.json`:
-
-```json
-{
-  "permission": "allow"
-}
-```
-
-Or set it at runtime:
-
-```
-opencode_config_update({ config: { permission: "allow" } })
-```
-
-If you prefer manual control, use the permission tools to detect and unblock stuck sessions:
+Prefer scoped rules in OpenCode config, then reply explicitly:
 
 | Tool | Description |
 |---|---|
-| `opencode_permission_list` | List all pending permission requests across sessions |
-| `opencode_session_permission` | Reply to a permission request (`once`, `always`, `reject`) |
+| `opencode_permission_list` | List pending permission requests |
+| `opencode_session_permission` | Reply `once`, `always`, or `reject` |
+| `opencode_question_list` | List pending user questions |
+| `opencode_question_reply` | Answer with selected-label arrays in question order |
+| `opencode_question_reject` | Dismiss a question without answering |
+
+`opencode_run` / `opencode_wait` return a blocked handle with the request
+id. Never auto-approve, choose `"always"`, or invent answers just to finish
+a wait.
 
 ## Auto-Start
 
-By default, the MCP server **automatically starts** `opencode serve` if it's not already running. To disable this:
+Prefer a separately managed `opencode serve` with `OPENCODE_AUTO_SERVE=false`.
+When auto-start is left on, the bridge probes
+`OPENCODE_BASE_URL/global/health`:
+
+- **Healthy** — attach; do not spawn.
+- **Connection refused on loopback** (`127.0.0.1`, `localhost`, `::1`) — start
+  an OpenCode **SDK child process**. This is not an in-process engine.
+  `opencode_fire` work does not survive this MCP process exiting.
+- **401/403, HTML, timeout, TLS/DNS, generic `fetch failed`, or a remote host**
+  — fail with a classified error. **401 does not spawn** another server.
+
+Disable auto-start if you manage OpenCode yourself (recommended):
 
 ```json
 {
   "env": {
-    "OPENCODE_AUTO_SERVE": "false"
+    "OPENCODE_AUTO_SERVE": "false",
+    "OPENCODE_BASE_URL": "http://127.0.0.1:4096"
   }
 }
 ```

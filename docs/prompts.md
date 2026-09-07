@@ -76,11 +76,10 @@ Get guidance on using opencode-mcp effectively.
 
 **What it does:**
 Provides structured advice on:
-- Initial setup and provider configuration
-- Tool selection (which tools to use for which tasks)
-- Session management and monitoring patterns
-- Common pitfalls and how to avoid them
-- Recommended workflows for common scenarios
+- Separately managed `opencode serve` vs loopback auto-start
+- Provider/model pairs (no half identifiers, no silent fallback)
+- `opencode_fire` as accepted dispatch; idle is not Done
+- Permission/question blocks and recovery without prompt replay
 
 ---
 

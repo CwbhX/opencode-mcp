@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { OpenCodeError } from "../src/http-transport.js";
 import {
   formatMessageResponse,
   formatMessageList,
@@ -358,65 +359,68 @@ describe("formatSessionList", () => {
 // ─── analyzeMessageResponse ──────────────────────────────────────────────
 
 describe("analyzeMessageResponse", () => {
-  it("detects null response as empty", () => {
+  it("treats a null body as a protocol failure, not missing credentials", () => {
     const result = analyzeMessageResponse(null);
     expect(result.isEmpty).toBe(true);
-    expect(result.hasError).toBe(false);
-    expect(result.warning).toContain("empty response");
-    expect(result.warning).toContain("opencode_setup");
+    expect(result.hasError).toBe(true);
+    expect(result.warning).not.toMatch(/API key|opencode_auth_set|missing credentials/i);
+    expect(result.warning).toMatch(/protocol|observation/i);
   });
 
-  it("detects undefined response as empty", () => {
+  it("treats undefined as a protocol failure, not an API-key diagnosis", () => {
     const result = analyzeMessageResponse(undefined);
     expect(result.isEmpty).toBe(true);
-    expect(result.warning).toContain("API key");
+    expect(result.hasError).toBe(true);
+    expect(result.warning).not.toMatch(/API key/i);
   });
 
-  it("detects response with empty parts array as empty", () => {
+  it("does not treat empty parts as missing credentials", () => {
     const result = analyzeMessageResponse({ parts: [] });
     expect(result.isEmpty).toBe(true);
-    expect(result.warning).toContain("no text content");
+    expect(result.hasError).toBe(false);
+    expect(result.warning).not.toMatch(/API key|opencode_auth_set/i);
   });
 
-  it("detects response with only whitespace text as empty", () => {
+  it("does not treat whitespace text as an auth failure", () => {
     const result = analyzeMessageResponse({
       parts: [{ type: "text", text: "   " }],
     });
     expect(result.isEmpty).toBe(true);
-    expect(result.warning).toContain("no text content");
+    expect(result.hasError).toBe(false);
+    expect(result.warning ?? "").not.toMatch(/API key|try a different/i);
   });
 
-  it("detects response with no text parts as empty", () => {
+  it("reports tool-only output as non-text completion, not a missing-key diagnosis", () => {
     const result = analyzeMessageResponse({
+      info: { id: "m1", role: "assistant" },
       parts: [{ type: "tool-invocation", toolName: "something" }],
     });
-    expect(result.isEmpty).toBe(true);
-    expect(result.warning).toContain("no text content");
+    expect(result.hasError).toBe(false);
+    expect(result.warning ?? "").not.toMatch(/API key|authentication/i);
   });
 
-  it("detects error parts with .error field", () => {
+  it("does not treat a tool-part error as a whole-turn auth failure", () => {
     const result = analyzeMessageResponse({
+      info: { role: "assistant" },
       parts: [{ type: "tool-result", error: "Unauthorized" }],
     });
-    expect(result.hasError).toBe(true);
-    expect(result.isEmpty).toBe(false);
-    expect(result.warning).toContain("Unauthorized");
-    expect(result.warning).toContain("authentication");
+    expect(result.hasError).toBe(false);
+    expect(result.warning ?? "").not.toMatch(/authentication issue/i);
   });
 
-  it("detects error keywords in text parts", () => {
+  it("does not treat benign text containing error keywords as failure", () => {
     const result = analyzeMessageResponse({
-      parts: [{ type: "text", text: "Error: invalid key provided" }],
+      parts: [{ type: "text", text: "I fixed the error handling for unauthorized and forbidden paths." }],
     });
-    expect(result.hasError).toBe(true);
-    expect(result.warning).toContain("invalid key");
+    expect(result.hasError).toBe(false);
+    expect(result.warning).toBeNull();
   });
 
-  it("detects 'unauthorized' keyword in text", () => {
+  it("does not treat unauthorized in ordinary text as an auth error", () => {
     const result = analyzeMessageResponse({
-      parts: [{ type: "text", text: "Request unauthorized by provider" }],
+      parts: [{ type: "text", text: "Request unauthorized by provider is a phrase I can explain." }],
     });
-    expect(result.hasError).toBe(true);
+    expect(result.hasError).toBe(false);
   });
 
   it("returns no warning for valid response with text", () => {
@@ -441,10 +445,26 @@ describe("analyzeMessageResponse", () => {
     expect(result.warning).toBeNull();
   });
 
-  it("handles response with no parts field", () => {
+  it("does not invent a missing-key diagnosis for a message with no parts", () => {
     const result = analyzeMessageResponse({ info: { id: "m1" } });
     expect(result.isEmpty).toBe(true);
-    expect(result.warning).toContain("no text content");
+    expect(result.warning).not.toMatch(/API key|opencode_auth_set/i);
+  });
+
+  it("keeps a typed assistant error even when leftover text looks harmless", () => {
+    const result = analyzeMessageResponse({
+      info: {
+        role: "assistant",
+        error: {
+          name: "APIError",
+          data: { message: "provider exploded" },
+        },
+      },
+      parts: [{ type: "text", text: "all good" }],
+    });
+    expect(result.hasError).toBe(true);
+    expect(result.warning).toMatch(/APIError/);
+    expect(result.warning).toMatch(/provider exploded/);
   });
 });
 
@@ -684,17 +704,22 @@ describe("toolError", () => {
 
   // ── Auto-suggestion tests ──────────────────────────────────────────
 
-  it("suggests auth fix for 401 errors", () => {
-    const result = toolError(new Error("Request failed with status 401"));
-    expect(result.content[0].text).toContain("Suggestions");
-    expect(result.content[0].text).toContain("opencode_provider_test");
-    expect(result.content[0].text).toContain("opencode_auth_set");
+  it("does not invent OpenCode auth advice from generic 401 or API-key wording", () => {
+    const status = toolError(new Error("Request failed with status 401"));
+    expect(status.content[0].text).not.toContain("opencode_auth_set");
+    expect(status.content[0].text).not.toMatch(/switch models/i);
+
+    const key = toolError(new Error("Invalid API key provided"));
+    expect(key.content[0].text).not.toContain("opencode_auth_set");
+    expect(key.content[0].text).not.toMatch(/try a different model/i);
   });
 
-  it("suggests auth fix for API key errors", () => {
-    const result = toolError(new Error("Invalid API key provided"));
-    expect(result.content[0].text).toContain("Suggestions");
-    expect(result.content[0].text).toContain("opencode_auth_set");
+  it("FUP-017: OpenCode HTTP 401 is server Basic-auth, not a model-switch instruction", () => {
+    const err = new OpenCodeError("unauthorized", 401, "GET", "/global/health", "");
+    const result = toolError(err);
+    expect(result.content[0].text).toMatch(/OPENCODE_SERVER_USERNAME|OPENCODE_SERVER_PASSWORD/);
+    expect(result.content[0].text).toMatch(/not a reason to switch models/i);
+    expect(result.content[0].text).not.toContain("opencode_auth_set");
   });
 
   it("suggests async pattern for timeout errors", () => {
@@ -709,10 +734,11 @@ describe("toolError", () => {
     expect(result.content[0].text).toContain("opencode_sessions_overview");
   });
 
-  it("suggests rate limit workaround for 429 errors", () => {
+  it("suggests retrying the same model after a 429, not switching models", () => {
     const result = toolError(new Error("Rate limit exceeded (429)"));
     expect(result.content[0].text).toContain("Suggestions");
-    expect(result.content[0].text).toContain("minimax-m2.1-free");
+    expect(result.content[0].text).toContain("same selected model");
+    expect(result.content[0].text).not.toContain("minimax-m2.1-free");
   });
 
   it("suggests server check for connection errors", () => {
@@ -844,14 +870,12 @@ describe("applyModelDefaults", () => {
     expect(result).toBeUndefined();
   });
 
-  it("returns undefined when only providerID is provided (incomplete pair)", () => {
-    const result = applyModelDefaults("anthropic");
-    expect(result).toBeUndefined();
+  it("throws when only providerID is provided (incomplete pair)", () => {
+    expect(() => applyModelDefaults("anthropic")).toThrow(/Both providerID and modelID/);
   });
 
-  it("returns undefined when only modelID is provided (incomplete pair)", () => {
-    const result = applyModelDefaults(undefined, "claude-opus-4-6");
-    expect(result).toBeUndefined();
+  it("throws when only modelID is provided (incomplete pair)", () => {
+    expect(() => applyModelDefaults(undefined, "claude-opus-4-6")).toThrow(/Both providerID and modelID/);
   });
 
   it("falls back to env-var defaults when no explicit params", () => {
@@ -860,10 +884,9 @@ describe("applyModelDefaults", () => {
     expect(result).toEqual({ providerID: "openai", modelID: "gpt-4o" });
   });
 
-  it("falls back to defaults when only providerID is given (incomplete)", () => {
+  it("rejects a single caller identifier instead of merging defaults", () => {
     setModelDefaults("openai", "gpt-4o");
-    const result = applyModelDefaults("anthropic");
-    expect(result).toEqual({ providerID: "openai", modelID: "gpt-4o" });
+    expect(() => applyModelDefaults("anthropic")).toThrow(/Both providerID and modelID/);
   });
 
   it("explicit params take priority over defaults", () => {
@@ -872,16 +895,14 @@ describe("applyModelDefaults", () => {
     expect(result).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-6" });
   });
 
-  it("returns undefined when only default providerID is set (incomplete pair)", () => {
+  it("throws when only default providerID is set (incomplete pair)", () => {
     setModelDefaults("openai", undefined);
-    const result = applyModelDefaults();
-    expect(result).toBeUndefined();
+    expect(() => applyModelDefaults()).toThrow(/both providerID and modelID/);
   });
 
-  it("returns undefined when only default modelID is set (incomplete pair)", () => {
+  it("throws when only default modelID is set (incomplete pair)", () => {
     setModelDefaults(undefined, "gpt-4o");
-    const result = applyModelDefaults();
-    expect(result).toBeUndefined();
+    expect(() => applyModelDefaults()).toThrow(/both providerID and modelID/);
   });
 });
 

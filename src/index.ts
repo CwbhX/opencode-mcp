@@ -9,7 +9,7 @@
  * providers, and more.
  *
  * Features:
- *  - 80 tools covering the entire OpenCode API surface
+ *  - 83 tools covering the OpenCode API surface
  *  - High-level workflow tools (opencode_ask, opencode_reply, etc.)
  *  - Smart response formatting for LLM-friendly output
  *  - MCP Resources for browseable project data
@@ -33,6 +33,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { OpenCodeClient } from "./client.js";
 import { ensureServer } from "./server-manager.js";
 import { setModelDefaults } from "./helpers.js";
+import { validateStartupModelConfig } from "./model-selection.js";
 
 // Tool groups
 import { registerGlobalTools } from "./tools/global.js";
@@ -40,6 +41,7 @@ import { registerConfigTools } from "./tools/config.js";
 import { registerProjectTools } from "./tools/project.js";
 import { registerSessionTools } from "./tools/session.js";
 import { registerMessageTools } from "./tools/message.js";
+import { registerQuestionTools } from "./tools/question.js";
 import { registerFileTools } from "./tools/file.js";
 import { registerProviderTools } from "./tools/provider.js";
 import { registerMiscTools } from "./tools/misc.js";
@@ -59,7 +61,15 @@ const autoServe = process.env.OPENCODE_AUTO_SERVE !== "false";
 const defaultProvider = process.env.OPENCODE_DEFAULT_PROVIDER;
 const defaultModel = process.env.OPENCODE_DEFAULT_MODEL;
 
-// Set global model defaults from env vars (used by applyModelDefaults() in tools)
+try {
+  validateStartupModelConfig();
+} catch (err) {
+  console.error(
+    `Fatal model configuration error: ${err instanceof Error ? err.message : String(err)}`,
+  );
+  process.exit(1);
+}
+
 setModelDefaults(defaultProvider, defaultModel);
 
 // Use env-var defaults in instruction examples; fall back to generic placeholders
@@ -71,7 +81,7 @@ const client = new OpenCodeClient({ baseUrl, username, password, autoServe });
 const server = new McpServer(
   {
     name: "opencode-mcp",
-    version: "1.11.0",
+    version: "1.12.0",
     description:
       "MCP server wrapping the OpenCode AI coding agent. " +
       "Delegates complex coding tasks (build apps, refactor, debug) to an autonomous AI agent. " +
@@ -82,7 +92,7 @@ const server = new McpServer(
       "# OpenCode MCP — Guide for LLM Clients",
       "",
       "You are connected to OpenCode, an autonomous AI coding agent that can build, edit, and debug software projects.",
-      "This server exposes ~80 tools organized into tiers. Use high-level tools first; drop to low-level only when needed.",
+      "This server exposes 83 tools organized into tiers. Use high-level tools first; drop to low-level only when needed.",
       "",
       "## Getting Started (First Time)",
       "1. Call `opencode_setup` — checks server health, shows configured providers, and suggests next steps.",
@@ -98,10 +108,10 @@ const server = new McpServer(
       "- `opencode_context` — get project info (path, git branch, config, agents) (read-only)",
       "",
       "### Tier 2 — Async Tasks (for complex/long work)",
-      "- `opencode_run` — RECOMMENDED: send a task and wait for completion in one call. Creates session, sends prompt, polls until done. Best for tasks under 10 minutes.",
-      "- `opencode_fire` — fire-and-forget: send a task and return immediately. Use `opencode_check` to monitor progress. Best for long tasks (10+ min).",
-      "- `opencode_check` — cheap progress report: status, todos, file counts. Use to monitor sessions from `opencode_fire`. (read-only)",
-      "- `opencode_wait` — block until a session finishes processing. Use after `opencode_message_send_async`. Has timeout.",
+      "- `opencode_run` — send a task and wait for a correlated result or a block/timeout. Uses `/prompt_async` plus a job handle. Best for tasks under 10 minutes.",
+      "- `opencode_fire` — accepted dispatch only: returns jobId + sessionId + requestMessageID + directory immediately. The model may still be running.",
+      "- `opencode_check` — observe that handle (prefer jobId, or sessionId + requestMessageID + directory). Idle/absent status is not success. (read-only)",
+      "- `opencode_wait` — wait on the same handle until terminal, blocked, timed out, or cancelled. Timeout does not abort server-side work.",
       "- `opencode_session_todo` — see the agent's internal task list for a session (read-only)",
       "",
       "### Tier 3 — Monitoring & Review",
@@ -115,6 +125,7 @@ const server = new McpServer(
       "- `opencode_session_*` — create, delete, fork, abort, share sessions",
       "- `opencode_message_*` — send messages, list history, execute commands",
       "- `opencode_permission_list` / `opencode_session_permission` — check and respond to permission requests",
+      "- `opencode_question_*` — list, reply, or reject pending user questions",
       "- `opencode_file_*` / `opencode_find_*` — search files, read content, check VCS status",
       "- `opencode_provider_*` — manage providers, auth, OAuth flows",
       "",
@@ -139,8 +150,8 @@ const server = new McpServer(
       "// Option B: Fire-and-forget (for longer tasks)",
       `opencode_fire({prompt: "Build a full React app with auth, dashboard...", providerID: "${exProvider}", modelID: "${exModel}"})`,
       "// ... do other work ...",
-      'opencode_check({sessionId: "ses_xxx"})  // quick progress check',
-      'opencode_review_changes({sessionId: "ses_xxx"})  // see changes after completion',
+      'opencode_check({jobId: "job_xxx"})  // or sessionId + requestMessageID + directory',
+      'opencode_review_changes({sessionId: "ses_xxx"})  // see changes after a correlated completion',
       "```",
       "",
       "### Continue working on an existing session:",
@@ -148,20 +159,20 @@ const server = new McpServer(
       `opencode_reply({sessionId: "ses_xxx", prompt: "Now add form validation", providerID: "${exProvider}", modelID: "${exModel}"})`,
       "```",
       "",
-      "## Permissions",
-      "OpenCode may pause a session to ask for permission (e.g. to run a shell command or access files outside the project).",
-      "- **Recommended for headless/automation:** Set `\"permission\": \"allow\"` in `opencode.json` to auto-approve all operations. Without this, sessions can block waiting for approval.",
-      "- **If a session seems stuck:** Call `opencode_permission_list` to check for pending permission requests, then respond with `opencode_session_permission`.",
-      "- You can also set permissions at runtime: `opencode_config_update({config: {permission: \"allow\"}})`",
+      "## Permissions and questions",
+      "OpenCode may pause a session to ask for permission or a user question.",
+      "- Do **not** set global `permission: \"allow\"` as the default workaround. Prefer scoped rules and explicit replies.",
+      "- `run`/`wait` return a blocked result with the request id. Then call `opencode_permission_list` / `opencode_session_permission` or `opencode_question_list` / `opencode_question_reply`.",
+      "- Never auto-approve, choose \"always\", or invent answers just to finish a wait.",
       "",
       "## Important Notes",
-      "- ALWAYS specify `providerID` and `modelID` when using `opencode_ask`, `opencode_reply`, `opencode_message_send`, or `opencode_message_send_async`. Without these, the agent may return empty responses. Use providers and models discovered via `opencode_setup` — do NOT hardcode any specific provider. If `OPENCODE_DEFAULT_PROVIDER` and `OPENCODE_DEFAULT_MODEL` env vars are set, they will be used as fallbacks when you don't specify them.",
-      "- The `directory` parameter on every tool targets a specific project. Omit it to use the server's default project. Must be an absolute path to an existing directory — relative paths and non-existent paths are rejected with a helpful error.",
-      "- Tools marked with `readOnlyHint: true` in their annotations are safe and don't modify state.",
+      "- ALWAYS pass both `providerID` and `modelID`, or configure both `OPENCODE_DEFAULT_PROVIDER` and `OPENCODE_DEFAULT_MODEL`. A single identifier is rejected and is not merged with defaults. Do not substitute a different model when the selected one is unavailable.",
+      "- The `directory` parameter must be an absolute existing directory. Relative paths, `~`, files, and literal `%` path segments are rejected. The OpenCode server's default context is used when it is omitted — not this MCP process's cwd.",
+      "- `readOnlyHint` is not a sandbox. A `plan` agent is not guaranteed write-incapable unless OpenCode permissions actually block writes.",
       "- Tools marked with `destructiveHint: true` (`opencode_instance_dispose`, `opencode_session_delete`) permanently delete data — confirm with the user before calling.",
-      "- `opencode_wait` sends `notifications/message` progress updates while blocking. If it times out, it returns a progress report instead of failing.",
-      "- For tasks under 10 minutes, prefer `opencode_run` (one call, handles everything). For longer tasks, use `opencode_fire` + `opencode_check`.",
-      "- For very long tasks, use `opencode_fire` + periodically call `opencode_check` or `opencode_session_todo` to monitor progress.",
+      "- `opencode_fire` returns an accepted handle, not a completed answer. Recover a timed-out job with `opencode_check`/`opencode_wait` using jobId or sessionId + requestMessageID + directory. Do not resubmit after an unknown acceptance.",
+      "- Auto-started OpenCode is an SDK child process on loopback, not an in-process engine. `fire` jobs do not survive this MCP process exiting. Use a separately managed `opencode serve` for shared or long-lived work.",
+      "- For tasks under 10 minutes, prefer `opencode_run`. For longer tasks, use `opencode_fire` + `opencode_check`/`opencode_wait` on the returned handle.",
     ].join("\n"),
   },
 );
@@ -172,6 +183,7 @@ registerConfigTools(server, client);
 registerProjectTools(server, client);
 registerSessionTools(server, client);
 registerMessageTools(server, client);
+registerQuestionTools(server, client);
 registerFileTools(server, client);
 registerProviderTools(server, client);
 registerMiscTools(server, client);
@@ -212,7 +224,7 @@ async function main() {
     ? ` | defaults: ${defaultProvider}/${defaultModel}`
     : "";
   console.error(
-    `opencode-mcp v1.11.0 started (OpenCode server at ${baseUrl}${defaultsInfo})`,
+    `opencode-mcp v1.12.0 started (OpenCode server at ${baseUrl}${defaultsInfo})`,
   );
 }
 

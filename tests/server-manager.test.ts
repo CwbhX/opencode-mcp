@@ -29,6 +29,7 @@ import {
   startServer,
   stopServer,
   ensureServer,
+  probeHealth,
 } from "../src/server-manager.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -61,6 +62,29 @@ function mockFetchNotOk() {
     ok: false,
     status: 500,
     text: async () => "Internal Server Error",
+  } as unknown as Response);
+}
+
+function mockFetchAuthFailed(status: 401 | 403 = 401) {
+  fetchMock.mockResolvedValueOnce({
+    ok: false,
+    status,
+    json: async () => ({ error: "Unauthorized" }),
+  } as unknown as Response);
+}
+
+function mockFetchHtml() {
+  fetchMock.mockResolvedValueOnce({
+    ok: true,
+    status: 200,
+    headers: {
+      get: (name: string) =>
+        name.toLowerCase() === "content-type" ? "text/html; charset=utf-8" : null,
+    },
+    json: async () => {
+      throw new SyntaxError("Unexpected token <");
+    },
+    text: async () => "<html><title>Welcome</title></html>",
   } as unknown as Response);
 }
 
@@ -160,6 +184,126 @@ describe("isServerRunning", () => {
   });
 });
 
+// ─── probeHealth ─────────────────────────────────────────────────────────
+
+describe("probeHealth", () => {
+  it("classifies HTTP 200 + { healthy: true } as healthy and records version", async () => {
+    mockFetchHealthy("1.18.29");
+    const result = await probeHealth("http://127.0.0.1:4096");
+    expect(result).toEqual({
+      classification: "healthy",
+      version: "1.18.29",
+      status: 200,
+    });
+  });
+
+  it("classifies HTTP 200 + { healthy: false } as reachable_but_unhealthy", async () => {
+    mockFetchUnhealthy();
+    const result = await probeHealth("http://127.0.0.1:4096");
+    expect(result.classification).toBe("reachable_but_unhealthy");
+    expect(result.status).toBe(200);
+  });
+
+  it("classifies HTTP 401 as authentication_failed", async () => {
+    mockFetchAuthFailed(401);
+    const result = await probeHealth("http://127.0.0.1:4096", "admin", "wrong");
+    expect(result).toEqual({
+      classification: "authentication_failed",
+      status: 401,
+    });
+  });
+
+  it("classifies HTTP 403 as authentication_failed", async () => {
+    mockFetchAuthFailed(403);
+    const result = await probeHealth("http://127.0.0.1:4096");
+    expect(result.classification).toBe("authentication_failed");
+    expect(result.status).toBe(403);
+  });
+
+  it("classifies ECONNREFUSED as connection_refused", async () => {
+    mockFetchDown();
+    const result = await probeHealth("http://127.0.0.1:4096");
+    expect(result).toEqual({ classification: "connection_refused" });
+  });
+
+  it("classifies generic fetch-failed network errors as incompatible_response, not connection_refused", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("fetch failed"));
+    const result = await probeHealth("http://127.0.0.1:4096");
+    expect(result.classification).not.toBe("connection_refused");
+    expect(result.classification).toBe("incompatible_response");
+  });
+
+  it("classifies DNS/TLS error codes as not connection_refused", async () => {
+    fetchMock.mockRejectedValueOnce(
+      Object.assign(new TypeError("fetch failed"), {
+        code: "ENOTFOUND",
+        cause: { code: "ENOTFOUND" },
+      }),
+    );
+    const dns = await probeHealth("http://127.0.0.1:4096");
+    expect(dns.classification).not.toBe("connection_refused");
+
+    fetchMock.mockRejectedValueOnce(
+      Object.assign(new Error("certificate"), {
+        code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+      }),
+    );
+    const tls = await probeHealth("http://127.0.0.1:4096");
+    expect(tls.classification).not.toBe("connection_refused");
+  });
+
+  it("classifies AbortError as probe_timed_out", async () => {
+    fetchMock.mockRejectedValueOnce(
+      Object.assign(new Error("aborted"), { name: "AbortError" }),
+    );
+    const result = await probeHealth("http://127.0.0.1:4096");
+    expect(result).toEqual({ classification: "probe_timed_out" });
+  });
+
+  it("classifies HTTP 200 HTML / non-JSON as incompatible_response", async () => {
+    mockFetchHtml();
+    const result = await probeHealth("http://127.0.0.1:4096");
+    expect(result.classification).toBe("incompatible_response");
+    expect(result.status).toBe(200);
+  });
+
+  it("classifies HTTP 200 JSON missing healthy as incompatible_response", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "ok" }),
+    } as unknown as Response);
+    const result = await probeHealth("http://127.0.0.1:4096");
+    expect(result.classification).toBe("incompatible_response");
+    expect(result.status).toBe(200);
+  });
+
+  it("classifies HTTP 500 as reachable_but_unhealthy", async () => {
+    // Documented policy: other non-2xx (except 401/403) means we reached a
+    // process that answered, so we must not auto-start a competing server.
+    mockFetchNotOk();
+    const result = await probeHealth("http://127.0.0.1:4096");
+    expect(result.classification).toBe("reachable_but_unhealthy");
+    expect(result.status).toBe(500);
+  });
+
+  it("sends Basic auth and honors timeoutMs", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    mockFetchHealthy("1.18.29");
+    await probeHealth("http://127.0.0.1:4096/", "admin", "secret123", {
+      timeoutMs: 1500,
+    });
+    expect(timeoutSpy).toHaveBeenCalledWith(1500);
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = (init.headers ?? {}) as Record<string, string>;
+    expect(headers.Authorization).toBe("Basic YWRtaW46c2VjcmV0MTIz");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4096/global/health",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+});
+
 // ─── startServer ─────────────────────────────────────────────────────────
 
 describe("startServer", () => {
@@ -225,17 +369,18 @@ describe("startServer", () => {
     );
   });
 
-  it("returns version=undefined when post-start health check fails", async () => {
+  it("fails and closes the child when post-start health is not healthy", async () => {
+    const close = vi.fn();
     createOpencodeServerMock.mockResolvedValueOnce({
       url: "http://127.0.0.1:4096",
-      close: vi.fn(),
+      close,
     });
-    mockFetchDown(); // health check after start fails
+    mockFetchDown();
 
-    const result = await startServer("http://127.0.0.1:4096", 5000);
-
-    expect(result.url).toBe("http://127.0.0.1:4096");
-    expect(result.version).toBeUndefined();
+    await expect(startServer("http://127.0.0.1:4096", 5000)).rejects.toThrow(
+      /post-start health/,
+    );
+    expect(close).toHaveBeenCalledOnce();
   });
 });
 
@@ -415,5 +560,149 @@ describe("ensureServer", () => {
     expect(createOpencodeServerMock).toHaveBeenCalledTimes(2);
     expect(a.url).toBe("http://127.0.0.1:4096");
     expect(b.url).toBe("http://127.0.0.1:5000");
+  });
+
+  it("START-01: healthy server with password still attaches", async () => {
+    mockFetchHealthy("1.18.29");
+
+    const result = await ensureServer({
+      baseUrl: "http://127.0.0.1:4096",
+      username: "admin",
+      password: "secret123",
+    });
+
+    expect(result).toEqual({
+      running: true,
+      version: "1.18.29",
+      managedByUs: false,
+      url: "http://127.0.0.1:4096",
+    });
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+    const logged = consoleErrorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(logged).not.toContain("secret123");
+    expect(logged).not.toContain("Authorization");
+  });
+
+  it("FUP-046/START-03: 401 probe does not call createOpencodeServer", async () => {
+    mockFetchAuthFailed(401);
+
+    await expect(
+      ensureServer({
+        baseUrl: "http://127.0.0.1:4096",
+        username: "admin",
+        password: "wrong-password",
+      }),
+    ).rejects.toThrow(/authentication|401|password|credential/i);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+  });
+
+  it("START-03: HTML 200 does not spawn", async () => {
+    mockFetchHtml();
+
+    await expect(
+      ensureServer({ baseUrl: "http://127.0.0.1:4096" }),
+    ).rejects.toThrow(/incompatible|html|not (an )?opencode/i);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+  });
+
+  it("START-03: timeout (AbortError) does not spawn", async () => {
+    fetchMock.mockRejectedValueOnce(
+      Object.assign(new Error("aborted"), { name: "AbortError" }),
+    );
+
+    await expect(
+      ensureServer({ baseUrl: "http://127.0.0.1:4096" }),
+    ).rejects.toThrow(/timed? ?out|timeout|slow/i);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+  });
+
+  it("after failed start, stopServer is safe", async () => {
+    mockFetchDown();
+    const closeMock = vi.fn();
+    createOpencodeServerMock.mockResolvedValueOnce({
+      url: "http://127.0.0.1:4096",
+      close: closeMock,
+    });
+    mockFetchAuthFailed(401);
+
+    await expect(
+      ensureServer({
+        baseUrl: "http://127.0.0.1:4096",
+        password: "secret123",
+      }),
+    ).rejects.toThrow(/authentication|401/i);
+    expect(closeMock).toHaveBeenCalledOnce();
+    expect(() => stopServer()).not.toThrow();
+    expect(closeMock).toHaveBeenCalledOnce();
+  });
+
+  it("remote hostname + connection_refused + autoServe true => throw, no spawn", async () => {
+    mockFetchDown();
+
+    await expect(
+      ensureServer({
+        baseUrl: "http://192.0.2.10:4096",
+        autoServe: true,
+      }),
+    ).rejects.toThrow(/remote|loopback/i);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+  });
+
+  it("START-04: includes executable-missing error from createOpencodeServer", async () => {
+    mockFetchDown();
+    createOpencodeServerMock.mockRejectedValueOnce(
+      new Error("spawn opencode ENOENT: command not found"),
+    );
+
+    await expect(
+      ensureServer({ baseUrl: "http://127.0.0.1:4096" }),
+    ).rejects.toThrow(/not found|ENOENT/i);
+  });
+
+  it("FUP-052: rejects unsupported auto-start URL forms before spawn", async () => {
+    mockFetchDown();
+    await expect(
+      ensureServer({ baseUrl: "https://127.0.0.1:4096", autoServe: true }),
+    ).rejects.toThrow(/http:\/\//);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+
+    mockFetchDown();
+    await expect(
+      ensureServer({ baseUrl: "http://127.0.0.1:4096/v1", autoServe: true }),
+    ).rejects.toThrow(/base path/);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+
+    mockFetchDown();
+    await expect(
+      ensureServer({
+        baseUrl: "http://user:pass@127.0.0.1:4096",
+        autoServe: true,
+      }),
+    ).rejects.toThrow(/credentials/);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+
+    mockFetchDown();
+    await expect(
+      ensureServer({ baseUrl: "http://127.0.0.1", autoServe: true }),
+    ).rejects.toThrow(/explicit port/);
+    expect(createOpencodeServerMock).not.toHaveBeenCalled();
+  });
+
+  it("FUP-052: loopback IPv6 with explicit port is an allowed auto-start target", async () => {
+    mockFetchDown();
+    createOpencodeServerMock.mockResolvedValueOnce({
+      url: "http://[::1]:4096",
+      close: vi.fn(),
+    });
+    mockFetchHealthy("1.18.29");
+
+    const result = await ensureServer({
+      baseUrl: "http://[::1]:4096",
+      autoServe: true,
+    });
+    expect(result.running).toBe(true);
+    expect(createOpencodeServerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ hostname: "::1", port: 4096 }),
+    );
   });
 });
