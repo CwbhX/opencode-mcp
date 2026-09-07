@@ -1,10 +1,10 @@
 /**
- * Layer B HTTP wire tests.
+ * Layer B HTTP client wire tests.
  *
  * Drive `OpenCodeClient` and the prompt/command serializers against a strict
- * local `http.createServer` fake. This is easier and more stable than spawning
- * `node dist/index.js` plus an MCP SDK client. It still records the actual
- * method/path/headers/body the bridge sends.
+ * local `http.createServer` fake. These are component tests of the HTTP
+ * transport; they do **not** launch `node dist/index.js`. Real MCP subprocess
+ * coverage lives in `tests/integration/mcp-stdio.test.ts`.
  *
  * The fake is not OpenCode. It rejects invalid command-model objects, nested
  * prompt variants, and invalid JSON; returns 204 for prompt_async; can return

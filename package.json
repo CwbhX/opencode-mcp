@@ -11,7 +11,8 @@
     "dist",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs/compatibility.md"
   ],
   "scripts": {
     "build": "tsc",
@@ -19,8 +20,8 @@
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "test": "vitest run",
-    "test:unit": "vitest run tests --exclude tests/integration/**",
-    "test:wire": "vitest run tests/integration/mcp-wire.test.ts",
+    "test:unit": "vitest run tests --exclude tests/integration",
+    "test:wire": "npm run build && vitest run tests/integration/http-transport-wire.test.ts tests/integration/mcp-stdio.test.ts",
     "test:server": "vitest run tests/integration/opencode-server.test.ts",
     "test:live": "node scripts/opencode-live-smoke.mjs",
     "test:watch": "vitest",
