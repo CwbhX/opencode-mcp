@@ -106,6 +106,16 @@ opencode_check({ jobId: "job_..." })
 → or sessionId + requestMessageID + directory; idle is not Done
 ```
 
+**Thinking / effort variant:** keys are per-model. List them, then pass one:
+
+```
+opencode_provider_models({ providerId: "opencode", limit: 0 })
+opencode_ask({ prompt: "...", providerID: "opencode", modelID: "...", variant: "<listed-key>" })
+```
+
+Omit `variant` for the model default. Do not invent a global thinking enum.
+See [Thinking / effort variants](docs/tools.md#thinking--effort-variants).
+
 ### All Tool Categories
 
 | Category | Count | Description |
@@ -117,7 +127,7 @@ opencode_check({ jobId: "job_..." })
 | [File & Search](docs/tools.md#file--search-tools) | 6 | Search text/regex, find files/symbols, read files |
 | [System](docs/tools.md#system--monitoring-tools) | 13 | Health, VCS, LSP, MCP servers, agents, logging |
 | [TUI Control](docs/tools.md#tui-control-tools) | 9 | Remote-control an **attached** OpenCode TUI (conditional) |
-| [Provider & Auth](docs/tools.md#provider--auth-tools) | 6 | List providers/models, set API keys, OAuth |
+| [Provider & Auth](docs/tools.md#provider--auth-tools) | 6 | List providers/models and thinking/effort variants, set API keys, OAuth |
 | [Config](docs/tools.md#config-tools) | 3 | Get/update configuration |
 | [Project](docs/tools.md#project-tools) | 3 | List, inspect, and initialize projects |
 | [Events](docs/tools.md#event-tools) | 1 | Poll real-time SSE events |

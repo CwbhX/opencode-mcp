@@ -17,6 +17,10 @@ MCP Resources are browseable data endpoints that clients can read without callin
 | `opencode://mcp-servers` | Status of all configured MCP servers in OpenCode |
 | `opencode://file-status` | VCS status of tracked files (modified, added, deleted) |
 
+`opencode://providers` is the raw OpenCode catalog. For LLM-friendly model
+lines plus enabled thinking/effort variant keys, use
+`opencode_provider_models`.
+
 ## How Resources Differ from Tools
 
 - **Resources** are read-only data endpoints. Clients can browse and subscribe to them.

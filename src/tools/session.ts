@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OpenCodeClient } from "../client.js";
 import { AmbiguousAcceptanceError, OpenCodeError } from "../http-transport.js";
 import { toolError, formatSessionList, formatDiffResponse, toolResult, directoryParam, destructive, readOnly } from "../helpers.js";
+import { unsupportedVariantParam } from "../model-variants.js";
 import { buildInitBody, buildSummarizeBody, resolveConfiguredModel } from "../model-selection.js";
 import { assertSessionDirectory, validateDirectory } from "../request-context.js";
 import { getSharedTaskManager } from "../task-manager.js";
@@ -267,7 +268,7 @@ export function registerSessionTools(
       messageID: z.string().describe("Message ID"),
       providerID: z.string().describe("Provider ID (e.g. 'anthropic')"),
       modelID: z.string().describe("Model ID (e.g. 'claude-3-5-sonnet-20241022')"),
-      variant: z.string().optional().describe("Model variant (e.g. 'fast', 'smart')"),
+      variant: unsupportedVariantParam,
       directory: directoryParam,
     },
     async ({ id, messageID, providerID, modelID, variant, directory }) => {
@@ -404,7 +405,7 @@ export function registerSessionTools(
       id: z.string().describe("Session ID"),
       providerID: z.string().describe("Provider ID (e.g. 'anthropic')"),
       modelID: z.string().describe("Model ID (e.g. 'claude-3-5-sonnet-20241022')"),
-      variant: z.string().optional().describe("Model variant (e.g. 'fast', 'smart')"),
+      variant: unsupportedVariantParam,
       directory: directoryParam,
     },
     async ({ id, providerID, modelID, variant, directory }) => {

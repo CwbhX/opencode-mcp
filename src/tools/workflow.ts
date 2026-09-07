@@ -17,6 +17,7 @@ import {
   directoryParam,
   readOnly,
 } from "../helpers.js";
+import { variantParam } from "../model-variants.js";
 import {
   buildPromptBody,
   assertModelPolicy,
@@ -397,7 +398,7 @@ export function registerWorkflowTools(
             tips.push("- Pass a `directory` parameter to target a specific project");
           }
           tips.push("- `opencode_context` — get full project context (config, VCS, agents)");
-          tips.push("- `opencode_provider_models` — explore available models for your configured providers");
+          tips.push("- `opencode_provider_models` — list models and thinking/effort variant keys for your configured providers");
         }
         sections.push(`## Next Steps\n${tips.join("\n")}`);
 
@@ -426,7 +427,7 @@ export function registerWorkflowTools(
         .string()
         .optional()
         .describe("Model ID (e.g. 'claude-3-5-sonnet-20241022')"),
-      variant: z.string().optional().describe("Model variant (e.g. 'fast', 'smart')"),
+      variant: variantParam,
       agent: z
         .string()
         .optional()
@@ -491,7 +492,7 @@ export function registerWorkflowTools(
       prompt: z.string().describe("The follow-up message"),
       providerID: z.string().optional().describe("Provider ID"),
       modelID: z.string().optional().describe("Model ID"),
-      variant: z.string().optional().describe("Model variant"),
+      variant: variantParam,
       agent: z.string().optional().describe("Agent to use"),
       directory: directoryParam,
     },
@@ -778,7 +779,7 @@ export function registerWorkflowTools(
     {
       providerId: z.string().describe("Provider ID to test (e.g. 'anthropic', 'openrouter')"),
       modelID: z.string().optional().describe("Specific model ID to test. If omitted, uses provider default."),
-      variant: z.string().optional().describe("Model variant"),
+      variant: variantParam,
       directory: directoryParam,
     },
     async ({ providerId, modelID, variant, directory }) => {
@@ -893,7 +894,7 @@ export function registerWorkflowTools(
       title: z.string().optional().describe("Session title (only for new sessions)"),
       providerID: z.string().optional().describe("Provider ID (e.g. 'anthropic')"),
       modelID: z.string().optional().describe("Model ID (e.g. 'claude-opus-4-6')"),
-      variant: z.string().optional().describe("Model variant"),
+      variant: variantParam,
       agent: z.string().optional().describe("Agent to use"),
       maxDurationSeconds: z
         .number()
@@ -954,7 +955,7 @@ export function registerWorkflowTools(
       title: z.string().optional().describe("Session title (only for new sessions)"),
       providerID: z.string().optional().describe("Provider ID (e.g. 'anthropic')"),
       modelID: z.string().optional().describe("Model ID (e.g. 'claude-opus-4-6')"),
-      variant: z.string().optional().describe("Model variant"),
+      variant: variantParam,
       agent: z.string().optional().describe("Agent to use"),
       directory: directoryParam,
     },

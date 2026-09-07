@@ -172,6 +172,9 @@ opencode_ask({
 // Check what's available
 opencode_provider_list({})
 
+// List models and thinking/effort variant keys (use limit: 0 for the full catalog)
+opencode_provider_models({ "providerId": "opencode", "limit": 0 })
+
 // Set an API key (one-time, global)
 opencode_auth_set({
   "providerId": "anthropic",
@@ -182,6 +185,29 @@ opencode_auth_set({
 // Test that it works
 opencode_provider_test({ "providerId": "anthropic" })
 ```
+
+## Thinking / effort variants
+
+Keys are **per-model**. Discover them; do not reuse another model's list.
+
+```json
+opencode_provider_models({ "providerId": "opencode", "limit": 0 })
+```
+
+Then pass one listed key as top-level `variant`:
+
+```json
+opencode_ask({
+  "prompt": "Explain the authentication flow in this project",
+  "providerID": "opencode",
+  "modelID": "muse-spark-1.3-contributor-free",
+  "variant": "<key from that model's listed variants>"
+})
+```
+
+Omit `variant` for the model's OpenCode default. Init, summarize, and shell
+reject `variant`. Host thinking pickers are not filled from this MCP schema.
+See [Thinking / effort variants](tools.md#thinking--effort-variants).
 
 ## Using Prompts
 

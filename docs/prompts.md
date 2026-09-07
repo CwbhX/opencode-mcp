@@ -78,6 +78,7 @@ Get guidance on using opencode-mcp effectively.
 Provides structured advice on:
 - Separately managed `opencode serve` vs loopback auto-start
 - Provider/model pairs (no half identifiers, no silent fallback)
+- Per-model thinking/effort `variant` keys from `opencode_provider_models`
 - `opencode_fire` as accepted dispatch; idle is not Done
 - Permission/question blocks and recovery without prompt replay
 

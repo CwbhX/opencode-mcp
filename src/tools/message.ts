@@ -8,6 +8,7 @@ import {
   formatMessageList,
   directoryParam,
 } from "../helpers.js";
+import { unsupportedVariantParam, variantParam } from "../model-variants.js";
 import {
   buildCommandBody,
   buildPromptBody,
@@ -129,7 +130,7 @@ export function registerMessageTools(
         .string()
         .optional()
         .describe("Model ID (e.g. 'claude-3-5-sonnet-20241022')"),
-      variant: z.string().optional().describe("Model variant (e.g. 'fast', 'smart')"),
+      variant: variantParam,
       agent: z.string().optional().describe("Agent to use"),
       noReply: z
         .boolean()
@@ -224,7 +225,7 @@ export function registerMessageTools(
         .string()
         .optional()
         .describe("Model ID (e.g. 'claude-3-5-sonnet-20241022')"),
-      variant: z.string().optional().describe("Model variant (e.g. 'fast', 'smart')"),
+      variant: variantParam,
       agent: z.string().optional().describe("Agent to use"),
       directory: directoryParam,
     },
@@ -265,7 +266,7 @@ export function registerMessageTools(
       agent: z.string().optional().describe("Agent to use"),
       providerID: z.string().optional().describe("Provider ID"),
       modelID: z.string().optional().describe("Model ID"),
-      variant: z.string().optional().describe("Model variant"),
+      variant: variantParam,
       directory: directoryParam,
     },
     async ({
@@ -313,7 +314,7 @@ export function registerMessageTools(
       agent: z.string().describe("Agent to use for the shell command"),
       providerID: z.string().optional().describe("Provider ID"),
       modelID: z.string().optional().describe("Model ID"),
-      variant: z.string().optional().describe("Model variant"),
+      variant: unsupportedVariantParam,
       directory: directoryParam,
     },
     async ({ sessionId, command, agent, providerID, modelID, variant, directory }) => {

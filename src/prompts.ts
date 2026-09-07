@@ -159,7 +159,7 @@ Steps:
 ## 1. First-Time Setup
 - Prefer a separately managed \`opencode serve\`, then attach with \`OPENCODE_AUTO_SERVE=false\`.
 - Always start with \`opencode_setup\` to check server health and see available providers.
-- Pick a provider from the **Ready to use** list, then call \`opencode_provider_models\` to see its models.
+- Pick a provider from the **Ready to use** list, then call \`opencode_provider_models\` to see its models and thinking/effort variant keys. Pass a listed key as top-level \`variant\` (per-model; omit for default).
 - Test a provider with \`opencode_provider_test\` if you're unsure it's working. A discovered default is still subject to \`OPENCODE_ALLOWED_MODELS\`.
 
 ## 2. Always Specify Provider and Model
@@ -167,6 +167,8 @@ CRITICAL: When calling \`opencode_ask\`, \`opencode_reply\`, \`opencode_run\`, \
 
 Good: \`opencode_ask({prompt: "...", providerID: "<your-provider>", modelID: "<your-model>"})\`
 Bad: \`opencode_ask({prompt: "..."})\` when an allowlist or explicit-model mode is configured.
+
+Thinking/effort \`variant\` keys are per-model. Copy a listed key from \`opencode_provider_models\`; omit \`variant\` for the model default. Do not invent a global thinking enum.
 
 ## 3. Choosing the Right Tool
 

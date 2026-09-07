@@ -74,6 +74,7 @@ Restart your MCP client after editing the config.
 Ask your client to run a tool:
 
 - *"Use opencode_setup to check server status"*
+- *"Use opencode_provider_models to list models and thinking/effort variants for a ready provider"*
 - *"Use opencode_context to get project info"*
 - *"Use opencode_ask to explain this project"*
 
@@ -92,6 +93,7 @@ You now have access to **83 registered tools** (13 workflow + 3 question +
 | `opencode_fire` | Accepted dispatch: `jobId` / `sessionId` / `requestMessageID` / `directory` |
 | `opencode_check` | Observe that handle; idle is not Done |
 | `opencode_context` | Get project info, VCS status, agents |
+| `opencode_provider_models` | List models and thinking/effort variant keys |
 
 See the full [Tools Reference](tools.md) and [Examples](examples.md).
 

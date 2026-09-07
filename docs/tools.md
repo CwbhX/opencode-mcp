@@ -14,8 +14,12 @@ Pass both `providerID` and `modelID`, or configure both
 `OPENCODE_DEFAULT_PROVIDER` and `OPENCODE_DEFAULT_MODEL`. A single identifier
 is rejected. There is no paid-model fallback.
 
+Thinking/effort **variants** are per-model catalog keys, not a global enum.
+See [Thinking / effort variants](#thinking--effort-variants).
+
 ## Table of Contents
 
+- [Thinking / effort variants](#thinking--effort-variants)
 - [Workflow Tools (13)](#workflow-tools) — start here
 - [Session Tools (20)](#session-tools)
 - [Message Tools (6)](#message-tools)
@@ -28,6 +32,35 @@ is rejected. There is no paid-model fallback.
 - [Event Tools (1)](#event-tools)
 - [Project Tools (3)](#project-tools)
 - [Global Tools (1)](#global-tools)
+
+---
+
+## Thinking / effort variants
+
+OpenCode models can expose named **variants** (thinking / reasoning-effort
+presets). The key you pass as `variant` is **per-model**. It is not a
+global thinking enum, and MCP schemas cannot list live keys (they are
+static).
+
+**Discover, then pass:**
+
+1. Call `opencode_provider_models` with the provider ID (`limit: 0` for the
+   full list; the default cap is 30 models).
+2. Each model line that has variants looks like
+   `- model-id — Display Name (variants: …; omit variant for default)`.
+   Disabled catalog entries are omitted.
+3. Pass one listed key as the **top-level** `variant` on
+   `opencode_ask`, `opencode_reply`, `opencode_run`, `opencode_fire`,
+   `opencode_message_send`, `opencode_message_send_async`,
+   `opencode_command_execute`, and `opencode_provider_test`.
+4. Omit `variant` to use that model's OpenCode default.
+
+**Rejected on:** `opencode_session_init`, `opencode_session_summarize`,
+`opencode_shell_execute`. Do not send `variant` on those tools.
+
+`variant` is never nested inside the `model` object on the OpenCode wire
+payload. Host UI pickers (Claude Code `/effort`, Cursor thinking menus)
+are not filled from this MCP schema — pass the key on the tool call.
 
 ---
 
@@ -57,7 +90,7 @@ One-shot interaction — creates a session, sends a prompt, returns the AI respo
 | `modelID` | string | no | Model (e.g. `"claude-opus-4-6"`) |
 | `agent` | string | no | Agent (e.g. `"build"`, `"plan"`). `plan` is not a write sandbox. |
 | `system` | string | no | System prompt override |
-| `variant` | string | no | Top-level model variant (not nested inside `model`) |
+| `variant` | string | no | Per-model thinking/effort key from `opencode_provider_models`. Omit for default. |
 | `directory` | string | no | Absolute existing project directory |
 
 ---
@@ -72,7 +105,7 @@ Follow-up message in an existing session.
 | `prompt` | string | yes | The follow-up message |
 | `providerID` | string | no | Provider ID (must pair with `modelID`) |
 | `modelID` | string | no | Model ID (must pair with `providerID`) |
-| `variant` | string | no | Top-level model variant |
+| `variant` | string | no | Per-model thinking/effort key from `opencode_provider_models`. Omit for default. |
 | `agent` | string | no | Agent to use |
 
 ---
@@ -91,7 +124,7 @@ accepted, not that the task succeeded. Idle or a missing status entry is
 | `title` | string | no | Session title (new sessions only) |
 | `providerID` | string | no | Provider ID (must pair with `modelID`) |
 | `modelID` | string | no | Model ID (must pair with `providerID`) |
-| `variant` | string | no | Top-level model variant |
+| `variant` | string | no | Per-model thinking/effort key from `opencode_provider_models`. Omit for default. |
 | `agent` | string | no | Agent to use |
 | `maxDurationSeconds` | number | no | Max wait time (default: 600 = 10 min) |
 
@@ -113,7 +146,7 @@ this MCP process; it does **not** survive MCP exit.
 | `title` | string | no | Session title (new sessions only) |
 | `providerID` | string | no | Provider ID (must pair with `modelID`) |
 | `modelID` | string | no | Model ID (must pair with `providerID`) |
-| `variant` | string | no | Top-level model variant |
+| `variant` | string | no | Per-model thinking/effort key from `opencode_provider_models`. Omit for default. |
 | `agent` | string | no | Agent to use |
 
 ---
@@ -202,6 +235,7 @@ model, and never a paid fallback.
 |---|---|---|---|
 | `providerId` | string | yes | Provider ID to test |
 | `modelID` | string | no | Model ID on this provider |
+| `variant` | string | no | Per-model thinking/effort key from `opencode_provider_models`. Omit for default. |
 
 ---
 
@@ -228,13 +262,13 @@ Full lifecycle management of OpenCode sessions (20 tools).
 | `opencode_session_children` | `id` | Get child sessions |
 | `opencode_session_status` | — | Status for all sessions |
 | `opencode_session_todo` | `id` | Get the todo list |
-| `opencode_session_init` | `id`, `messageID`, `providerID`, `modelID` | Create AGENTS.md (slow) |
+| `opencode_session_init` | `id`, `messageID`, `providerID`, `modelID` | Create AGENTS.md (slow); `variant` is rejected |
 | `opencode_session_abort` | `id` | Abort a running session |
 | `opencode_session_fork` | `id`, `messageID?` | Fork a session |
 | `opencode_session_share` | `id` | Share publicly |
 | `opencode_session_unshare` | `id` | Unshare |
 | `opencode_session_diff` | `id`, `messageID?` | Get raw diff |
-| `opencode_session_summarize` | `id`, `providerID`, `modelID` | AI-summarize (slow) |
+| `opencode_session_summarize` | `id`, `providerID`, `modelID` | AI-summarize (slow); `variant` is rejected |
 | `opencode_session_revert` | `id`, `messageID`, `partID?` | Revert a message |
 | `opencode_session_unrevert` | `id` | Restore reverted messages |
 | `opencode_session_permission` | `id`, `permissionID`, `reply` | Reply `once` / `always` / `reject`. Do not auto-approve to finish a wait. |
@@ -252,7 +286,7 @@ Send prompts and execute commands (6 tools).
 | `opencode_message_get` | `sessionId`, `messageId` | Get a specific message |
 | `opencode_message_send` | `sessionId`, `text`, `providerID?`, `modelID?`, `variant?` | Sync prompt; model is `{providerID, modelID}`, variant is top-level |
 | `opencode_message_send_async` | `sessionId`, `text`, `providerID?`, `modelID?`, `variant?` | `POST /prompt_async` (204 accepted); returns a job handle |
-| `opencode_command_execute` | `sessionId`, `command`, `arguments?`, `providerID?`, `modelID?` | Slash command; model is a `"provider/model"` string |
+| `opencode_command_execute` | `sessionId`, `command`, `arguments?`, `providerID?`, `modelID?`, `variant?` | Slash command; model is a `"provider/model"` string; `variant` is top-level |
 | `opencode_shell_execute` | `sessionId`, `command`, `agent` | Shell; model object if provided; `variant` is rejected |
 
 ---
@@ -304,8 +338,8 @@ Manage LLM providers and authentication (6 tools).
 
 | Tool | Key Parameters | Description |
 |---|---|---|
-| `opencode_provider_list` | — | List providers with connection status |
-| `opencode_provider_models` | `providerId`, `limit?` | List models for a provider |
+| `opencode_provider_list` | — | Compact provider status; use `opencode_provider_models` for models and variants |
+| `opencode_provider_models` | `providerId`, `limit?` | List models and enabled thinking/effort variant keys (`limit: 0` for all) |
 | `opencode_provider_auth_methods` | — | Get available auth methods |
 | `opencode_provider_oauth_authorize` | `providerId` | Start OAuth flow |
 | `opencode_provider_oauth_callback` | `providerId`, `callbackData` | Handle OAuth callback |

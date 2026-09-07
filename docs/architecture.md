@@ -24,6 +24,7 @@ src/
 ├── task-manager.ts       prompt_async submit + job correlation
 ├── task-status.ts        Evidence-to-status reducer (idle ≠ Done)
 ├── model-selection.ts    Endpoint-specific model serializers
+├── model-variants.ts     Per-model thinking/effort catalog keys
 ├── request-context.ts    Absolute directory + session identity
 ├── event-monitor.ts      Scoped SSE; ready only on server.connected
 ├── typed-outcome.ts      Typed assistant/provider/server-auth errors
@@ -112,8 +113,16 @@ whitespace identifiers are invalid, not “use defaults.” Optional
 `OPENCODE_ALLOWED_MODELS` (JSON array of `provider/model` strings) rejects
 pairs outside the list and cannot be bypassed by omitting the pair; the first
 entry is not substituted. There is no paid fallback and no hardcoded free-model
-catalog. `variant` is a separate top-level field on prompt/command requests;
-init and summarize reject it.
+catalog.
+
+### Thinking / effort variants
+
+`variant` is a separate **top-level** field on prompt and command requests
+(not nested inside `model`). Keys come from that model's OpenCode catalog
+(`GET /provider` → `models[].variants`). The bridge lists **enabled** keys
+via `opencode_provider_models` (`disabled: true` entries are omitted). MCP
+schemas are static, so they cannot enumerate live keys. Init, summarize, and
+shell reject `variant`.
 
 ### Auto-Start
 

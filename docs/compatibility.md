@@ -46,7 +46,9 @@ tests exist, and what has been verified.
 - **Model identity is a full pair.** A single `providerID` or `modelID` is
   rejected and is not merged with defaults. There is no paid-model fallback
   and no hardcoded free-model list. Discover providers with `opencode_setup`
-  / `opencode_provider_list`.
+  / `opencode_provider_list`. Discover thinking/effort **variant** keys with
+  `opencode_provider_models` (per-model; omit `variant` for the catalog
+  default). Init, summarize, and shell reject `variant`.
 - **`OPENCODE_REQUIRE_EXPLICIT_MODEL=true`** requires an explicit or
   configured full pair. **`OPENCODE_ALLOWED_MODELS`** is a JSON array of
   `provider/model` strings (for example
@@ -140,7 +142,7 @@ question + 67 other), plus **10 resources** and **6 prompts**.
 | `opencode_config_update` | `PATCH /config` | Partial merge | OpenCode | — | ~1.18.29 source | Do not use this to set global `permission: "allow"` as a default workaround |
 | `opencode_config_providers` | `GET /config/providers` | Configured providers | OpenCode | — | ~1.18.29 source | |
 | `opencode_provider_list` | `GET /provider` | Live provider list | OpenCode | PACKAGE-02 (A) | ~1.18.29 source | No stale hardcoded free-model catalog |
-| `opencode_provider_models` | `GET /provider` | Models for one provider | Provider id | — | ~1.18.29 source | Discover at call time |
+| `opencode_provider_models` | `GET /provider` | Models **and variant keys** for one provider | Provider id | — | ~1.18.29 source | Discover at call time |
 | `opencode_provider_auth_methods` | `GET /provider/auth` | Auth methods | OpenCode | — | ~1.18.29 source | |
 | `opencode_provider_oauth_authorize` | `POST /provider/{id}/oauth/authorize` | Start OAuth | Interactive user | — | ~1.18.29 source | **Not exercised** (no real OAuth in tests) |
 | `opencode_provider_oauth_callback` | `POST /provider/{id}/oauth/callback` | Callback payload | Interactive user | — | ~1.18.29 source | **Not exercised** |
@@ -189,7 +191,7 @@ the contract.
 
 | Layer | How to run | Status |
 |---|---|---|
-| A — unit/contract | `npm run test:unit` | Passed (591 tests, 1 skipped). Serializers, transport, task manager, status, directory, startup probe, live-result validator. |
+| A — unit/contract | `npm run test:unit` | Passed (598 tests, 1 skipped). Serializers, transport, task manager, status, directory, startup probe, live-result validator, variant catalog listing. |
 | B — HTTP + MCP stdio | `npm run test:wire` | Passed (14 tests). HTTP-client fake **and** spawned `node dist/index.js` over MCP stdio against a strict fake OpenCode. Not a real OpenCode process. |
 | C — tagged OpenCode v1.18.29 | `OPENCODE_MCP_SERVER_BINARY=… OPENCODE_MCP_SERVER_TEST=1 npm run test:server` | Passed FUP-055 (binary `1.18.29`) and isolated serve + MCP `session_create` (health version `1.18.29`). Skip without opt-in is not a pass. Opt-in + missing/wrong binary fails. FUP-056 (localhost provider fixture, delayed async completion, two-step tool turn) is **not** implemented. |
 | D — live model | `OPENCODE_MCP_LIVE_TEST=1 OPENCODE_AUTO_SERVE=false … npm run test:live` | Passed one MCP `opencode_fire` → `opencode_wait` probe against a separately managed `opencode serve` **1.18.29**. Requested and observed pair: `opencode/muse-spark-1.3-contributor-free`. `state=succeeded`, `terminal=true`. Skip without opt-in is not a pass. Opt-in with missing config fails. This is not a certification of every tool or of later OpenCode versions. |

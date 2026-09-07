@@ -2,6 +2,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OpenCodeClient } from "../client.js";
 import { toolJson, toolError, toolResult, directoryParam, isProviderConfigured } from "../helpers.js";
+import { formatModelCatalogLine } from "../model-variants.js";
 
 export function registerProviderTools(
   server: McpServer,
@@ -65,7 +66,7 @@ export function registerProviderTools(
         }
 
         return toolResult(
-          `## Providers (${configured.length} configured / ${providers.length} total)\n${lines.join("\n")}\n\nUse \`opencode_provider_models\` with a provider ID to see its models.`,
+          `## Providers (${configured.length} configured / ${providers.length} total)\n${lines.join("\n")}\n\nUse \`opencode_provider_models\` with a provider ID to see its models and thinking/effort variants.`,
         );
       } catch (e) {
         return toolError(e);
@@ -75,7 +76,7 @@ export function registerProviderTools(
 
   server.tool(
     "opencode_provider_models",
-    "List available models for a specific provider. Call opencode_provider_list first to see provider IDs.",
+    "List available models for a specific provider, including each model's thinking/effort variant keys. Call opencode_provider_list first to see provider IDs. Pass a listed key as top-level `variant` on ask/run/fire/reply.",
     {
       providerId: z
         .string()
@@ -130,18 +131,20 @@ export function registerProviderTools(
 
         const maxItems = limit === 0 ? modelList.length : (limit ?? 30);
         const shown = modelList.slice(0, maxItems);
-        const lines = shown.map((m: Record<string, unknown>) => {
-          const id = m.id ?? m.name ?? "?";
-          const name = m.name && m.name !== m.id ? ` — ${m.name}` : "";
-          return `- ${id}${name}`;
-        });
+        const lines = shown.map((m: Record<string, unknown>) =>
+          formatModelCatalogLine(m),
+        );
 
         const truncNote = modelList.length > maxItems
           ? `\n\n... and ${modelList.length - maxItems} more. Use \`limit: 0\` to see all.`
           : "";
 
+        const variantHint =
+          "\n\nPass a listed key as the top-level `variant` on ask/run/fire/reply (and other prompt tools). " +
+          "Variants are this model's thinking/effort presets, not a global enum. Omit `variant` for the model default.";
+
         return toolResult(
-          `## ${providerId} (${configured ? "configured" : "NOT CONFIGURED"}) — ${modelList.length} model${modelList.length !== 1 ? "s" : ""}\n${lines.join("\n")}${truncNote}`,
+          `## ${providerId} (${configured ? "configured" : "NOT CONFIGURED"}) — ${modelList.length} model${modelList.length !== 1 ? "s" : ""}\n${lines.join("\n")}${truncNote}${variantHint}`,
         );
       } catch (e) {
         return toolError(e);

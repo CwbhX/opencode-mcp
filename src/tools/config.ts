@@ -118,7 +118,7 @@ export function registerConfigTools(server: McpServer, client: OpenCodeClient) {
         if (extraLines.length > 0) {
           output += `\n\n## Additional Default Models\n${extraLines.join("\n")}`;
         }
-        output += `\n\nUse \`opencode_provider_models\` with a provider ID to see full model details.`;
+        output += `\n\nUse \`opencode_provider_models\` with a provider ID to see models and thinking/effort variants.`;
 
         return toolResult(output);
       } catch (e) {

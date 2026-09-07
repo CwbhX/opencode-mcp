@@ -31,6 +31,11 @@ below are unchanged; they describe the earlier commit, not these fixes.
 
 ### Changed
 
+- `opencode_provider_models` lists each model's enabled thinking/effort
+  `variant` keys from the OpenCode catalog. Prompt-tool `variant` schemas no
+  longer advertise a global `fast`/`smart` pair. Docs (README, getting
+  started, tools, examples, architecture, compatibility) describe discover-
+  then-pass.
 - HTTP-client wire tests live in `tests/integration/http-transport-wire.test.ts`.
   `npm run test:wire` also launches `node dist/index.js` over MCP stdio.
 - `docs/compatibility.md` ships in the npm tarball. `verification-summary.json`

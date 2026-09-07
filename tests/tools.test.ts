@@ -751,6 +751,44 @@ describe("Tool handlers", () => {
       expect(text).not.toContain("gpt-4");
     });
 
+    it("lists per-model thinking/effort variant keys from the catalog", async () => {
+      const mockClient = createMockClient({
+        get: vi.fn().mockResolvedValue([
+          {
+            id: "opencode",
+            source: "env",
+            models: {
+              "muse-spark-1.3-contributor-free": {
+                id: "muse-spark-1.3-contributor-free",
+                name: "Muse Spark 1.3 Free",
+                variants: {
+                  minimal: { reasoningEffort: "minimal" },
+                  high: { reasoningEffort: "high" },
+                  xhigh: { reasoningEffort: "xhigh" },
+                  fast: { disabled: true },
+                },
+              },
+            },
+          },
+        ]),
+      });
+      const tools = new Map<string, Function>();
+      const mockServer = {
+        tool: vi.fn((...args: unknown[]) => {
+          tools.set(args[0] as string, args[args.length - 1] as Function);
+        }),
+      } as unknown as McpServer;
+      registerProviderTools(mockServer, mockClient);
+
+      const handler = tools.get("opencode_provider_models")!;
+      const result = await handler({ providerId: "opencode" });
+      const text = result.content[0].text;
+      expect(text).toContain("muse-spark-1.3-contributor-free");
+      expect(text).toMatch(/variants: minimal, high, xhigh/);
+      expect(text).not.toMatch(/variants:.*fast/);
+      expect(text).toMatch(/top-level `variant`/i);
+    });
+
     it("returns error for unknown provider", async () => {
       const mockClient = createMockClient({
         get: vi.fn().mockResolvedValue(providerData),
