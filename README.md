@@ -8,16 +8,31 @@
 
 This repository is the **[CwbhX/opencode-mcp](https://github.com/CwbhX/opencode-mcp)** fork of [AlaeddineMessadi/opencode-mcp](https://github.com/AlaeddineMessadi/opencode-mcp). Install it from GitHub. `npx opencode-mcp` and `npm i -g opencode-mcp` pull the **npm registry** package, which is upstream, not this fork.
 
-opencode-mcp is an MCP server that bridges your AI tools (Claude, Cursor, Windsurf, VS Code, etc.) to OpenCode's headless API. It lets your AI delegate real coding work — building features, debugging, refactoring, running tests — to OpenCode sessions that autonomously read, write, and execute code in your project.
+opencode-mcp is an MCP server that bridges your AI tools (Claude, Cursor, Windsurf, VS Code, etc.) to OpenCode's headless API. It lets your AI delegate real coding work (building features, debugging, refactoring, running tests) to OpenCode sessions that autonomously read, write, and execute code in your project.
 
 **83 registered tools** (13 workflow + 3 question + 67 other) | **10 resources** | **6 prompts** | **Multi-project** | **Loopback auto-start**
 
-## Why Use This?
+## Why this fork
 
-- **Delegate coding tasks** — Tell Claude "build me a REST API" and it delegates to OpenCode, which creates files, installs packages, writes tests, and reports back.
-- **Parallel work** — Fire off tasks to OpenCode and keep working. `opencode_fire` returns an accepted handle; `opencode_check` / `opencode_wait` observe that handle.
-- **Any MCP client** — Works with Claude Desktop, Claude Code, Cursor, Windsurf, VS Code Copilot, Cline, Continue, Zed, Amazon Q, and any other MCP-compatible tool.
-- **Attach or auto-start** — If nothing is listening on loopback, the bridge starts an OpenCode **SDK child process**. It does not spawn on HTTP 401, and it does not start a remote impersonator.
+OpenCode's server API moved. The [original project](https://github.com/AlaeddineMessadi/opencode-mcp) still speaks the older one. Against a current OpenCode install, that shows up as tasks that look finished when they are not, prompts that can get sent twice, and no way to answer when OpenCode pauses to ask you something.
+
+This fork follows OpenCode 1.18.
+
+- Background work is tracked until it actually finishes, not until a session looks idle.
+- When OpenCode asks a question or waits for permission, that comes back to you. Nothing is auto-approved to make the wait succeed.
+- The model you pick is the one that runs. A missing or unavailable model is not swapped for another one.
+- Thinking and effort are per model, not a global fast/smart list. Ask OpenCode for that model's names (`opencode_provider_models`), then pass one as `variant`. Leave `variant` off to use the model's default. Init, summarize, and shell do not take a thinking setting.
+- Project paths have to be real directories, so work lands where you meant.
+- If nothing is listening on this machine, the bridge can start OpenCode locally. It will not spin up a local copy because a remote server rejected you, and background jobs do not survive quitting the MCP client.
+
+Details live in [Compatibility](docs/compatibility.md) and [Recommended deployment](#recommended-deployment). The original package is still what `npx opencode-mcp` installs. This one is GitHub-only.
+
+## Why use this at all
+
+- **Delegate coding tasks.** Tell Claude "build me a REST API" and it delegates to OpenCode, which creates files, installs packages, writes tests, and reports back.
+- **Parallel work.** Fire off tasks to OpenCode and keep working. `opencode_fire` returns an accepted handle; `opencode_check` / `opencode_wait` observe that handle.
+- **Any MCP client.** Works with Claude Desktop, Claude Code, Cursor, Windsurf, VS Code Copilot, Cline, Continue, Zed, Amazon Q, and any other MCP-compatible tool.
+- **Attach or auto-start.** If nothing is listening on loopback, the bridge starts an OpenCode SDK child process. It does not spawn on HTTP 401, and it does not start a remote impersonator.
 
 ## Quick Start
 
