@@ -22,7 +22,7 @@ opencode serve --port 4096 --hostname 127.0.0.1
 Then point the MCP bridge at it with `OPENCODE_AUTO_SERVE=false` (see
 [Configuration](configuration.md)). Optional auto-start is only a loopback
 fallback when the health probe is connection-refused. HTTP **401 does not
-spawn**. An SDK child is not in-process: background `opencode_fire` jobs die
+spawn**. That child is not in-process: background `opencode_fire` jobs die
 when this MCP process exits.
 
 ## Step 2: Add to Your Client

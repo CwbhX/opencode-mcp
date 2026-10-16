@@ -56,8 +56,9 @@ function asKnownRaw(value: string): RawSessionState {
 /**
  * Normalize GET /session/status payloads.
  *
- * The v1.18 server map uses idle | busy | retry and *removes* idle entries.
- * Absence is therefore "absent", not idle and not success.
+ * The bridge synthesizes this map from v2's active-session list: entries
+ * are present only while a session is running. Absence is therefore
+ * "absent", not idle and not success.
  */
 export function normalizeRawSessionState(
   raw: unknown,
@@ -195,6 +196,32 @@ function eventEvidence(obs: TaskObservations): EventEvidence {
         attributedError = formatNormalizedError(named);
         attributedAbort = named.name === "MessageAbortedError";
       }
+      continue;
+    }
+
+    if (type === "session.execution.failed") {
+      // v2 terminal-failure event; properties carry sessionID (+ error
+      // when the server includes one). Only a dedicated session's failure
+      // can be attributed to our single in-flight request.
+      const named = normalizeNamedError(
+        isRecord(event.properties) ? event.properties.error : undefined,
+        "session_event",
+      );
+      const formatted = named
+        ? formatNormalizedError(named)
+        : "session.execution.failed event without a structured error payload";
+      if (!sessionId) {
+        uncertainSessionError =
+          `Session execution failed without session ID (${formatted}); not attributed to this task.`;
+        continue;
+      }
+      if (obs.sessionId && sessionId !== obs.sessionId) continue;
+      if (obs.dedicatedNewSession === true && obs.requestMessageID) {
+        attributedError = formatted;
+        continue;
+      }
+      uncertainSessionError =
+        `${formatted} A session-only error on a shared session cannot be attributed with certainty.`;
       continue;
     }
 

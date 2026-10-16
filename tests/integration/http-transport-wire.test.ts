@@ -1,14 +1,18 @@
 /**
- * Layer B HTTP client wire tests.
+ * Layer B HTTP client wire tests (OpenCode v2).
  *
- * Drive `OpenCodeClient` and the prompt/command serializers against a strict
- * local `http.createServer` fake. These are component tests of the HTTP
- * transport; they do **not** launch `node dist/index.js`. Real MCP subprocess
+ * Drive `OpenCodeClient` and the prompt/command serializers against a
+ * strict local `http.createServer` fake speaking the v2 wire shapes.
+ * These are component tests of the HTTP transport + translation layer;
+ * they do **not** launch `node dist/index.js`. Real MCP subprocess
  * coverage lives in `tests/integration/mcp-stdio.test.ts`.
  *
- * The fake is not OpenCode. It rejects invalid command-model objects, nested
- * prompt variants, and invalid JSON; returns 204 for prompt_async; can return
- * 401; and counts POSTs so mutations are proven not to replay.
+ * The fake is not OpenCode. It enforces the v2 contract points the
+ * bridge depends on: prompts are `{id?, text}` (v1 `parts`/`model`/
+ * `variant` keys are rejected), model+variant are set per session via
+ * `POST /api/session/{id}/model`, responses are `{data}` envelopes,
+ * directory scoping arrives as `location[directory]`, and POSTs are
+ * counted so mutations are proven not to replay.
  *
  * Covered IDs: WIRE-01, REPLAY-01, REPLAY-04, MODEL-01, MODEL-02.
  */
@@ -33,7 +37,7 @@ interface RecordedRequest {
   search: string;
   contentType: string;
   authorization: string;
-  directory: string;
+  locationDirectory: string;
   rawBody: string;
   json: unknown;
 }
@@ -49,6 +53,8 @@ interface FakeOptions {
 function startFake(opts: FakeOptions = {}) {
   const requests: RecordedRequest[] = [];
   let postCount = 0;
+  const messages: unknown[] = [];
+  let sessionModel: Record<string, unknown> | undefined;
 
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -68,7 +74,7 @@ function startFake(opts: FakeOptions = {}) {
         search: parsed.search,
         contentType,
         authorization: String(req.headers.authorization ?? ""),
-        directory: String(req.headers["x-opencode-directory"] ?? ""),
+        locationDirectory: parsed.searchParams.get("location[directory]") ?? "",
         rawBody,
         json: undefined,
       };
@@ -88,11 +94,9 @@ function startFake(opts: FakeOptions = {}) {
         }
       }
 
+      requests.push(recorded);
       if (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE") {
         postCount += 1;
-        requests.push(recorded);
-      } else {
-        requests.push(recorded);
       }
 
       if (opts.requireAuth) {
@@ -100,36 +104,8 @@ function startFake(opts: FakeOptions = {}) {
           `${opts.expectedUser ?? "opencode"}:${opts.expectedPassword ?? "secret"}`,
         ).toString("base64");
         if (recorded.authorization !== `Basic ${expected}`) {
-          res.writeHead(401, { "Content-Type": "text/plain" });
-          res.end("unauthorized");
-          return;
-        }
-      }
-
-      if (recorded.directory && recorded.directory.startsWith("~")) {
-        res.writeHead(400, { "Content-Type": "text/plain" });
-        res.end("bad directory routing");
-        return;
-      }
-
-      const body = recorded.json;
-      if (body && typeof body === "object") {
-        const rec = body as Record<string, unknown>;
-        if (rec.model && typeof rec.model === "object") {
-          const model = rec.model as Record<string, unknown>;
-          if ("variant" in model) {
-            res.writeHead(400, { "Content-Type": "text/plain" });
-            res.end("nested prompt variant is invalid");
-            return;
-          }
-        }
-        if (
-          recorded.pathname.endsWith("/command") &&
-          rec.model !== undefined &&
-          typeof rec.model !== "string"
-        ) {
-          res.writeHead(400, { "Content-Type": "text/plain" });
-          res.end("command model must be a provider/model string");
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ _tag: "UnauthorizedError", message: "Authentication required" }));
           return;
         }
       }
@@ -146,40 +122,89 @@ function startFake(opts: FakeOptions = {}) {
           res.end(override >= 400 ? "error" : "");
           return;
         }
-        if (recorded.pathname.endsWith("/prompt_async")) {
+      }
+
+      const body = recorded.json as Record<string, unknown> | undefined;
+      const send = (status: number, data?: unknown) => {
+        if (status === 204) {
           res.writeHead(204);
           res.end();
           return;
         }
-        if (recorded.pathname === "/session") {
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ id: "ses_wire" }));
-          return;
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      };
+      const invalid = (message: string) =>
+        send(400, { _tag: "InvalidRequestError", message });
+
+      // ── v2 routes ──
+      if (method === "GET" && recorded.pathname === "/api/info") {
+        return send(200, { version: "2.0.28-fake", urls: ["http://127.0.0.1"] });
+      }
+      if (method === "POST" && recorded.pathname === "/api/session") {
+        return send(200, {
+          data: {
+            id: "ses_wire",
+            projectID: "proj",
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: 1, updated: 1 },
+            location: { directory: recorded.locationDirectory || "/tmp" },
+          },
+        });
+      }
+      if (method === "POST" && /\/api\/session\/[^/]+\/model$/.test(recorded.pathname)) {
+        if (!body || !("model" in body) || typeof body.model !== "object" || body.model === null) {
+          return invalid("model must be a Model.Ref object");
         }
-        if (recorded.pathname.endsWith("/command")) {
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true }));
-          return;
+        const model = body.model as Record<string, unknown>;
+        if (typeof model.id !== "string" || typeof model.providerID !== "string") {
+          return invalid("Model.Ref requires id + providerID");
         }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
-        return;
+        if ("modelID" in model) return invalid("Model.Ref uses id, not modelID");
+        sessionModel = model;
+        return send(204);
+      }
+      if (method === "POST" && /\/api\/session\/[^/]+\/prompt$/.test(recorded.pathname)) {
+        if (!body) return invalid("prompt body required");
+        for (const banned of ["parts", "model", "variant", "agent", "system", "noReply", "messageID"]) {
+          if (banned in body) return invalid(`v2 prompt rejects v1 key: ${banned}`);
+        }
+        if (typeof body.text !== "string") return invalid("prompt requires text");
+        const user = {
+          id: typeof body.id === "string" ? body.id : "msg_user_wire",
+          type: "user",
+          text: body.text,
+          time: { created: 10 },
+        };
+        messages.push(user, {
+          id: "msg_asst_wire",
+          type: "assistant",
+          agent: "build",
+          model: sessionModel ?? { id: "default-model", providerID: "default-provider" },
+          finish: "stop",
+          time: { created: 11, completed: 12 },
+          content: [{ type: "text", text: "wire answer" }],
+        });
+        return send(200, { data: { ...user, sessionID: "ses_wire", payload: { text: body.text }, delivery: "steer" } });
+      }
+      if (method === "POST" && /\/api\/session\/[^/]+\/command$/.test(recorded.pathname)) {
+        if (!body || typeof body.name !== "string" || typeof body.text !== "string") {
+          return invalid("command requires {name, text}");
+        }
+        if ("model" in body || "command" in body) return invalid("v1 command keys rejected");
+        return send(204);
+      }
+      if (method === "POST" && /\/api\/experimental\/session\/[^/]+\/wait$/.test(recorded.pathname)) {
+        return send(204);
+      }
+      if (method === "GET" && /\/api\/session\/[^/]+\/message$/.test(recorded.pathname)) {
+        const limit = parsed.searchParams.get("limit");
+        const page = limit ? messages.slice(0, Number(limit)) : messages;
+        return send(200, { data: page, cursor: {} });
       }
 
-      if (recorded.pathname === "/session/ses_wire/message") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ info: { id: "msg_1", role: "assistant" }, parts: [] }));
-        return;
-      }
-
-      if (recorded.pathname === "/global/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ healthy: true, version: "1.18.29-fake" }));
-        return;
-      }
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true }));
+      return send(200, { ok: true });
     });
   });
 
@@ -188,7 +213,6 @@ function startFake(opts: FakeOptions = {}) {
     requests: RecordedRequest[];
     postCount: () => number;
     close: () => Promise<void>;
-    setDropNextPost: (value: boolean) => void;
   }>((resolve, reject) => {
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address() as AddressInfo;
@@ -196,9 +220,6 @@ function startFake(opts: FakeOptions = {}) {
         baseUrl: `http://127.0.0.1:${addr.port}`,
         requests,
         postCount: () => postCount,
-        setDropNextPost: (value) => {
-          opts.dropNextPost = value;
-        },
         close: () =>
           new Promise<void>((done, fail) => {
             server.close((err) => (err ? fail(err) : done()));
@@ -222,48 +243,53 @@ function clientFor(baseUrl: string, extras?: ConstructorParameters<typeof OpenCo
   return new OpenCodeClient({
     baseUrl,
     autoServe: false,
+    password: "wire-pw",
     retryDelayMs: 0,
     ...extras,
   });
 }
 
-describe("Layer B OpenCode HTTP wire (local fake)", () => {
-  it("WIRE-01: POST JSON Content-Type and body; prompt_async returns 204 without JSON parse", async () => {
+describe("Layer B OpenCode v2 HTTP wire (local fake)", () => {
+  it("WIRE-01: prompt_async becomes model-set + {text} prompt on /api routes; acceptance resolves undefined", async () => {
     fake = await startFake();
     const client = clientFor(fake.baseUrl);
     const body = buildPromptBody({
       prompt: "hello",
-      model: { providerID: "opencode", modelID: "muse-spark-1.3-contributor-free" },
-      variant: "fast",
+      model: { providerID: "openrouter", modelID: "meta/muse-spark-open" },
+      variant: "high",
+      messageID: "msg_wire_req",
     });
 
     const result = await client.post("/session/ses_wire/prompt_async", body);
     expect(result).toBeUndefined();
 
     const posted = fake.requests.filter((r) => r.method === "POST");
-    expect(posted).toHaveLength(1);
-    expect(posted[0].pathname).toBe("/session/ses_wire/prompt_async");
+    expect(posted.map((r) => r.pathname)).toEqual([
+      "/api/session/ses_wire/model",
+      "/api/session/ses_wire/prompt",
+    ]);
     expect(posted[0].contentType).toMatch(/application\/json/i);
-    expect(posted[0].rawBody).toBe(JSON.stringify(body));
-    expect(() => JSON.parse(posted[0].rawBody)).not.toThrow();
-    expect(posted[0].json).toEqual(body);
+    expect(posted[0].json).toEqual({
+      model: { id: "meta/muse-spark-open", providerID: "openrouter", variant: "high" },
+    });
+    expect(posted[1].json).toEqual({ id: "msg_wire_req", text: "hello" });
   });
 
-  it("WIRE-01: GET query string is forwarded; authenticated GET can 401", async () => {
+  it("WIRE-01: health uses /api/info with mandatory Basic auth; 401 surfaces once", async () => {
     fake = await startFake({
       requireAuth: true,
       expectedUser: "opencode",
       expectedPassword: "s3cret",
     });
 
-    const anon = clientFor(fake.baseUrl);
+    const anon = clientFor(fake.baseUrl, { password: undefined });
     await expect(anon.get("/global/health")).rejects.toMatchObject({
       name: "OpenCodeError",
       status: 401,
       method: "GET",
-      path: "/global/health",
+      path: "/api/info",
     });
-    expect(fake.requests.filter((r) => r.pathname === "/global/health")).toHaveLength(1);
+    expect(fake.requests.filter((r) => r.pathname === "/api/info")).toHaveLength(1);
 
     const authed = clientFor(fake.baseUrl, {
       username: "opencode",
@@ -271,75 +297,60 @@ describe("Layer B OpenCode HTTP wire (local fake)", () => {
     });
     await expect(authed.get("/global/health")).resolves.toEqual({
       healthy: true,
-      version: "1.18.29-fake",
+      version: "2.0.28-fake",
     });
-    await expect(
-      authed.get("/session/ses_wire/message", { limit: "2" }),
-    ).resolves.toMatchObject({ info: { id: "msg_1" } });
-
-    const listed = fake.requests.find((r) => r.pathname === "/session/ses_wire/message");
-    expect(listed?.search).toBe("?limit=2");
   });
 
-  it("MODEL-01: prompt body is a model object plus top-level variant (not nested)", async () => {
+  it("MODEL-01: sync message applies variant via the session model, never nested in the prompt", async () => {
     fake = await startFake();
     const client = clientFor(fake.baseUrl);
     const body = buildPromptBody({
       prompt: "ping",
-      model: { providerID: "opencode", modelID: "muse-spark-1.3-contributor-free" },
+      model: { providerID: "openrouter", modelID: "meta/muse-spark-open" },
       variant: "max",
     });
 
-    await client.post("/session/ses_wire/message", body);
+    const result = (await client.post("/session/ses_wire/message", body)) as {
+      info: Record<string, unknown>;
+      parts: Array<Record<string, unknown>>;
+    };
+    expect(result.info.modelID).toBe("meta/muse-spark-open");
+    expect(result.parts[0]?.text).toBe("wire answer");
 
-    const posted = fake.requests.find((r) => r.pathname.endsWith("/message"));
-    expect(posted?.json).toEqual({
-      parts: [{ type: "text", text: "ping" }],
-      model: {
-        providerID: "opencode",
-        modelID: "muse-spark-1.3-contributor-free",
-      },
-      variant: "max",
-    });
-    const model = (posted?.json as { model?: Record<string, unknown> }).model;
-    expect(model).not.toHaveProperty("variant");
+    const prompt = fake.requests.find((r) => r.pathname.endsWith("/prompt"));
+    expect(prompt?.json).toEqual({ text: "ping" });
+    const modelCall = fake.requests.find((r) => r.pathname.endsWith("/model"));
+    expect((modelCall?.json as { model: Record<string, unknown> }).model.variant).toBe("max");
   });
 
-  it("MODEL-02: command model is a provider/model string; object model is rejected by the fake", async () => {
+  it("MODEL-02: command sends {name,text}; the provider/model string is split onto the session model", async () => {
     fake = await startFake();
     const client = clientFor(fake.baseUrl);
 
-    await expect(
-      client.post("/session/ses_wire/command", {
-        command: "init",
-        model: { providerID: "opencode", modelID: "muse-spark-1.3-contributor-free" },
-      }),
-    ).rejects.toMatchObject({
-      name: "OpenCodeError",
-      status: 400,
-    });
-    expect(fake.postCount()).toBe(1);
-
     const valid = buildCommandBody({
       command: "init",
-      model: { providerID: "opencode", modelID: "muse-spark-1.3-contributor-free" },
+      arguments: "",
+      model: { providerID: "openrouter", modelID: "meta/muse-spark-open" },
       variant: "fast",
     });
-    expect(valid.model).toBe("opencode/muse-spark-1.3-contributor-free");
-    expect(valid.variant).toBe("fast");
-    await expect(client.post("/session/ses_wire/command", valid)).resolves.toEqual({
-      ok: true,
+    expect(valid.model).toBe("openrouter/meta/muse-spark-open");
+
+    await client.post("/session/ses_wire/command", valid);
+
+    const command = fake.requests.find((r) => r.pathname.endsWith("/command"));
+    expect(command?.json).toEqual({ name: "init", text: "" });
+    const modelCall = fake.requests.find((r) => r.pathname.endsWith("/model"));
+    expect(modelCall?.json).toEqual({
+      model: { id: "meta/muse-spark-open", providerID: "openrouter", variant: "fast" },
     });
-    expect(fake.postCount()).toBe(2);
   });
 
   it("REPLAY-01: accepted POST then dropped connection is not replayed", async () => {
     fake = await startFake({ dropNextPost: true });
     const client = clientFor(fake.baseUrl);
-    const body = buildPromptBody({ prompt: "do not replay" });
 
     const err = await client
-      .post("/session/ses_wire/prompt_async", body)
+      .post("/session/ses_wire/prompt_async", buildPromptBody({ prompt: "do not replay" }))
       .then(
         () => undefined,
         (error: unknown) => error,
@@ -353,9 +364,7 @@ describe("Layer B OpenCode HTTP wire (local fake)", () => {
   });
 
   it("REPLAY-04: POST 503 is not automatically repeated", async () => {
-    fake = await startFake({
-      postStatus: () => 503,
-    });
+    fake = await startFake({ postStatus: () => 503 });
     const client = clientFor(fake.baseUrl);
 
     await expect(
@@ -365,11 +374,8 @@ describe("Layer B OpenCode HTTP wire (local fake)", () => {
   });
 
   it("WIRE-04: 401 on POST is OpenCodeError and is not replayed", async () => {
-    fake = await startFake({
-      requireAuth: true,
-      expectedPassword: "s3cret",
-    });
-    const client = clientFor(fake.baseUrl);
+    fake = await startFake({ requireAuth: true, expectedPassword: "s3cret" });
+    const client = clientFor(fake.baseUrl, { password: undefined });
     await expect(
       client.post("/session/ses_wire/prompt_async", buildPromptBody({ prompt: "x" })),
     ).rejects.toMatchObject({

@@ -88,6 +88,8 @@ function applicationType(parsed: Record<string, unknown>): string | undefined {
 function eventProperties(
   parsed: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
+  // v2 envelope: { id, type, data: {...}, location?, durable? }.
+  if (isRecord(parsed.data)) return parsed.data;
   if (isRecord(parsed.properties)) return parsed.properties;
   if (isRecord(parsed.payload) && isRecord(parsed.payload.properties)) {
     return parsed.payload.properties;

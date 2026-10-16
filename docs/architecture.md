@@ -7,7 +7,7 @@ opencode-mcp is a **stdio-based MCP server** that bridges MCP clients to the Ope
 ```
 ┌─────────────┐     stdio      ┌───────────────┐     HTTP      ┌─────────────────────────┐
 │  MCP Client  │ <────────────> │  opencode-mcp  │ <──────────> │  OpenCode Server        │
-│  (Claude,    │   JSON-RPC     │  (this package) │   REST API   │  (SDK child on loopback │
+│  (Claude,    │   JSON-RPC     │  (this package) │   REST API   │  (`opencode serve` child on loopback │
 │   Cursor)    │                │                 │              │   or external `opencode │
 │              │                │                 │              │   serve` you launched)  │
 └─────────────┘                └───────────────┘              └─────────────────────────┘
@@ -93,7 +93,7 @@ Raw API responses are deeply nested JSON. The `helpers.ts` module transforms the
 - **204 No Content** — Returned as `undefined` without JSON parse (`/prompt_async`)
 - **SSE streaming** — Async generator for Server-Sent Events
 - **Directory validation** — Absolute existing directories only; `~` and
-  relative paths are rejected. Sent as `x-opencode-directory`
+  relative paths are rejected. Sent as the v2 `location[directory]` query parameter
 - **Read reconnect** — Connection-refused GETs may probe/auto-start on
   loopback. A later 401/unhealthy probe is the error that surfaces. Auth
   failures never spawn. Jobs are not moved if reconnect would change the URL.
@@ -130,7 +130,7 @@ On startup, the MCP probes `OPENCODE_BASE_URL/global/health`:
 
 - **Healthy** — attach; do not spawn.
 - **Connection refused** on loopback — `createOpencodeServer()` starts an
-  OpenCode **SDK child process**. This is not an in-process engine.
+  spawned `opencode serve` **child process**. This is not an in-process engine.
   `opencode_fire` jobs do not survive this MCP process exiting.
 - **401/403, HTML, timeout, TLS/DNS, generic `fetch failed`, remote host** —
   classified error; **do not spawn**.

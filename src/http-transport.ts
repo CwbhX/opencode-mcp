@@ -285,6 +285,14 @@ async function dispatchOnce<T>(
     }
 
     if (!text.trim()) return undefined as T;
+    const contentType = (res.headers?.get("content-type") ?? "").toLowerCase();
+    if (
+      contentType.includes("application/octet-stream") ||
+      contentType.startsWith("text/plain")
+    ) {
+      // v2 file reads return raw bytes as text, not JSON.
+      return text as T;
+    }
     try {
       return JSON.parse(text) as T;
     } catch {

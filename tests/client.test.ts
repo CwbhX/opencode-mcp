@@ -15,15 +15,10 @@ vi.mock("../src/server-manager.js", () => ({
 }));
 
 /**
- * Mock `@opencode-ai/sdk` so every call to `createOpencodeClient` (both the
- * one in the `OpenCodeClient` constructor and the one issued by
- * `buildSdkClient` during reconnect) returns a fresh object. Tests that
- * assert SDK-client identity after a URL rebind rely on this.
+ * The client speaks the OpenCode v2 HTTP API directly (no SDK). Tests
+ * below use internal bridge paths (e.g. `/agent`) and assert the v2 wire
+ * translation (`/api/agent`, `location[directory]` query scoping).
  */
-vi.mock("@opencode-ai/sdk", () => ({
-  createOpencodeClient: () => ({ _client: {} }),
-  OpencodeClient: vi.fn(),
-}));
 
 import { OpenCodeClient, OpenCodeError, AmbiguousAcceptanceError } from "../src/client.js";
 import { normalizeDirectory } from "../src/helpers.js";
@@ -150,9 +145,13 @@ describe("OpenCodeClient", () => {
       expect(client.getBaseUrl()).toBe("http://localhost:4096");
     });
 
-    it("exposes the underlying SDK client via `api`", () => {
+    it("adopts credentials set after managed auto-start", () => {
       const client = new OpenCodeClient({ baseUrl: "http://localhost:4096" });
-      expect(client.api).toBeDefined();
+      client.setCredentials("opencode", "generated-pw");
+      expect(client.getCredentials()).toEqual({
+        username: "opencode",
+        password: "generated-pw",
+      });
     });
   });
 
@@ -202,7 +201,7 @@ describe("OpenCodeClient", () => {
     it("sends Basic Authorization when password is set", async () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonOk({ ok: true }));
       const client = makeClient({ password: "secret" });
-      await client.get("/health");
+      await client.get("/agent");
       expect(headerOf(fetchMock.mock.calls[0][1] as RequestInit, "authorization")).toBe(
         "Basic " + Buffer.from("opencode:secret").toString("base64"),
       );
@@ -211,7 +210,7 @@ describe("OpenCodeClient", () => {
     it("uses the provided username in the Basic header", async () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonOk({ ok: true }));
       const client = makeClient({ username: "admin", password: "secret" });
-      await client.get("/health");
+      await client.get("/agent");
       expect(headerOf(fetchMock.mock.calls[0][1] as RequestInit, "authorization")).toBe(
         "Basic " + Buffer.from("admin:secret").toString("base64"),
       );
@@ -245,35 +244,56 @@ describe("normalizeDirectory", () => {
   });
 });
 
-// ─── x-opencode-directory header (regression: must NOT be URI-encoded) ───
+// ─── v2 location scoping (directory -> location[directory] query) ───────
 
-describe("x-opencode-directory header", () => {
+describe("v2 location scoping", () => {
   /**
-   * Regression test for the bug where directory paths like `/tmp/proj` were
-   * URI-encoded to `%2Ftmp%2Fproj` before being placed in the header. The
-   * OpenCode server treats the header value as a literal absolute filesystem
-   * path, so encoding broke project scoping for every tool that accepts a
-   * `directory` argument.
+   * v2 scopes location-bound endpoints with a `location[directory]`
+   * query parameter instead of v1's `x-opencode-directory` header. The
+   * value is the literal absolute path (URL-encoded by the URL builder,
+   * decoded by the server).
    */
-  it("sends the raw normalized path (no URI encoding)", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonOk({}));
+  it("sends directory as the location[directory] query parameter", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonOk({
+          directory: "/tmp",
+          project: { id: "p1", directory: "/tmp", canonical: "/tmp" },
+        }),
+      )
+      .mockResolvedValueOnce(jsonOk([]));
 
     const client = makeClient();
-    await client.get("/project/current", undefined, "/tmp");
+    const project = (await client.get("/project/current", undefined, "/tmp")) as {
+      worktree?: string;
+    };
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const value = headerOf(fetchMock.mock.calls[0][1] as RequestInit, "x-opencode-directory");
-    expect(value).toBe("/tmp");
-    expect(value).not.toContain("%2F");
+    expect(project.worktree).toBe("/tmp");
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("/api/location?");
+    expect(new URL(url).searchParams.get("location[directory]")).toBe("/tmp");
+    expect(
+      headerOf(fetchMock.mock.calls[0][1] as RequestInit, "x-opencode-directory"),
+    ).toBeNull();
   });
 
-  it("omits the header when no directory is provided", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonOk({}));
+  it("omits location when no directory is provided", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonOk({
+          directory: "/tmp",
+          project: { id: "p1", directory: "/tmp", canonical: "/tmp" },
+        }),
+      )
+      .mockResolvedValueOnce(jsonOk([]));
 
     const client = makeClient();
     await client.get("/project/current");
 
-    expect(headerOf(fetchMock.mock.calls[0][1] as RequestInit, "x-opencode-directory")).toBeNull();
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(new URL(url).searchParams.get("location[directory]")).toBeNull();
   });
 });
 
@@ -310,38 +330,34 @@ describe("reconnect path", () => {
     mockFlakyThenOk();
 
     const client = makeClient({ autoServe: true });
-    const originalApi = client.api;
 
     ensureServerMock.mockResolvedValueOnce({
       running: true,
-      version: "1.14.46",
+      version: "2.0.28",
       managedByUs: true,
       url: "http://localhost:5000",
     });
 
-    await expect(client.get("/health")).rejects.toThrow(/not moved/i);
+    await expect(client.get("/agent")).rejects.toThrow(/not moved/i);
     expect(ensureServerMock).toHaveBeenCalledOnce();
     expect(client.getBaseUrl()).toBe("http://localhost:4096");
-    expect(client.api).toBe(originalApi);
   });
 
-  it("does not rebuild the SDK client when ensureServer returns the same url", async () => {
+  it("retries the read when ensureServer returns the same url", async () => {
     mockFlakyThenOk();
 
     const client = makeClient({ autoServe: true });
-    const originalApi = client.api;
 
     ensureServerMock.mockResolvedValueOnce({
       running: true,
-      version: "1.14.46",
+      version: "2.0.28",
       managedByUs: true,
       url: "http://localhost:4096",
     });
 
-    await client.get("/health");
+    await client.get("/agent");
 
     expect(client.getBaseUrl()).toBe("http://localhost:4096");
-    expect(client.api).toBe(originalApi);
   });
 
   it("resets reconnectAttempts after a successful request", async () => {
@@ -351,11 +367,11 @@ describe("reconnect path", () => {
       mockFlakyThenOk();
       ensureServerMock.mockResolvedValueOnce({
         running: true,
-        version: "1.14.46",
+        version: "2.0.28",
         managedByUs: true,
         url: "http://localhost:4096",
       });
-      await client.get("/health");
+      await client.get("/agent");
     }
 
     expect(ensureServerMock).toHaveBeenCalledTimes(4);
@@ -370,7 +386,7 @@ describe("reconnect path", () => {
     );
 
     const client = makeClient({ autoServe: true });
-    await expect(client.get("/health")).rejects.toThrow(/401|authentication failed/i);
+    await expect(client.get("/agent")).rejects.toThrow(/401|authentication failed/i);
     expect(ensureServerMock).toHaveBeenCalledOnce();
   });
 
@@ -531,15 +547,16 @@ describe("subscribeSSE", () => {
     });
   });
 
-  it("sends x-opencode-directory when a directory is provided", async () => {
+  it("subscribes to the v2 /api/event stream (directory validated, not forwarded)", async () => {
     const fetchMock = installFakeFetch("event: ready\ndata: hi\n\n");
     const client = new OpenCodeClient({ baseUrl: "http://localhost:4096" });
     for await (const _ of client.subscribeSSE("/event", { directory: "/tmp" })) {
       /* drain */
     }
-    expect(headerOf(fetchMock.mock.calls[0][1] as RequestInit, "x-opencode-directory")).toBe(
-      "/tmp",
-    );
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/event");
+    expect(
+      headerOf(fetchMock.mock.calls[0][1] as RequestInit, "x-opencode-directory"),
+    ).toBeNull();
   });
 });
 
@@ -547,8 +564,9 @@ describe("subscribeSSE", () => {
 
 describe("operation-aware fetch adapter", () => {
   it("WIRE-01: POST JSON Content-Type + serialized JSON; 204 returns undefined without parse throw", async () => {
-    const payload = { foo: 1, nested: { a: "b" } };
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    const payload = { title: "x" };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toContain("/api/session");
       expect(headerOf(init, "content-type")).toMatch(/application\/json/i);
       expect(init?.body).toBe(JSON.stringify(payload));
       expect(init?.body).not.toBe(String(payload));
@@ -573,24 +591,24 @@ describe("operation-aware fetch adapter", () => {
       .mockResolvedValueOnce(mockResponse({ status: 400, body: "" }));
 
     const client = makeClient();
-    await expect(client.get("/missing")).rejects.toMatchObject({
+    await expect(client.get("/agent")).rejects.toMatchObject({
       name: "OpenCodeError",
       status: 400,
       method: "GET",
-      path: "/missing",
+      path: "/api/agent",
     });
 
     fetchMock.mockReset();
     fetchMock.mockRejectedValue(new Error("fetch failed"));
-    const err = await client.get("/health").then(
+    const err = await client.get("/agent").then(
       () => undefined,
       (error: unknown) => error as OpenCodeError,
     );
     expect(err).toBeInstanceOf(OpenCodeError);
     expect(err?.method).toBe("GET");
-    expect(err?.path).toBe("/health");
+    expect(err?.path).toBe("/api/agent");
     expect(err?.message).toMatch(/GET/);
-    expect(err?.message).toMatch(/\/health/);
+    expect(err?.message).toMatch(/\/api\/agent/);
   });
 
   it("WIRE-03: GET transient 503 retried, then success; retry count bounded", async () => {
@@ -600,7 +618,7 @@ describe("operation-aware fetch adapter", () => {
       .mockResolvedValueOnce(jsonOk({ ok: true }));
 
     const client = makeClient();
-    await expect(client.get("/health")).resolves.toEqual({ ok: true });
+    await expect(client.get("/agent")).resolves.toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     fetchMock.mockReset();
@@ -610,7 +628,7 @@ describe("operation-aware fetch adapter", () => {
       .mockResolvedValueOnce(mockResponse({ status: 503, body: "unavailable" }))
       .mockResolvedValueOnce(jsonOk({ ok: true }));
 
-    await expect(client.get("/health")).rejects.toMatchObject({
+    await expect(client.get("/agent")).rejects.toMatchObject({
       name: "OpenCodeError",
       status: 503,
     });
@@ -630,7 +648,7 @@ describe("operation-aware fetch adapter", () => {
         sleeps.push(ms);
       },
     });
-    await expect(client.get("/health")).resolves.toEqual({ ok: true });
+    await expect(client.get("/agent")).resolves.toEqual({ ok: true });
     expect(sleeps).toEqual([2000]);
   });
 
@@ -640,7 +658,7 @@ describe("operation-aware fetch adapter", () => {
       .mockResolvedValue(mockResponse({ status: 401, body: "nope" }));
 
     const client = makeClient({ autoServe: true });
-    await expect(client.get("/health")).rejects.toMatchObject({
+    await expect(client.get("/agent")).rejects.toMatchObject({
       name: "OpenCodeError",
       status: 401,
     });

@@ -24,7 +24,16 @@ export function enabledVariantKeys(
   model: Record<string, unknown>,
 ): string[] {
   const variants = model.variants;
-  if (!variants || typeof variants !== "object" || Array.isArray(variants)) {
+  if (Array.isArray(variants)) {
+    // Raw v2 catalog form: variants is an array of { id, settings }.
+    return variants
+      .filter(
+        (v): v is Record<string, unknown> =>
+          typeof v === "object" && v !== null && typeof v.id === "string",
+      )
+      .map((v) => v.id as string);
+  }
+  if (!variants || typeof variants !== "object") {
     return [];
   }
   return Object.entries(variants as Record<string, unknown>)

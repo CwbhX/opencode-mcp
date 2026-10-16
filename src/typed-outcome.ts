@@ -67,7 +67,11 @@ export function normalizeNamedError(
   if (!isRecord(error)) return null;
 
   const data = errorData(error);
-  const name = asString(error.name) ?? "Error";
+  const name =
+    asString(error.name) ??
+    asString(error.type) ??
+    asString(error._tag) ??
+    "Error";
   const rawMessage =
     asString(data?.message) ??
     asString(error.message) ??

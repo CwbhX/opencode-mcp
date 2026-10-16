@@ -1,8 +1,14 @@
 # Tools Reference
 
 Registered surface: **83 tools** (13 workflow + 3 question + 67 other).
-See [compatibility.md](compatibility.md) for endpoints, test IDs, and
-limitations.
+This bridge targets **OpenCode v2**. A few v1-era tools have no v2
+equivalent and return a clear "not available on OpenCode v2" error:
+the 9 `opencode_tui_*` tools, `opencode_session_todo`,
+`opencode_session_share`/`unshare`, `opencode_find_text`,
+`opencode_find_symbol`, `opencode_lsp_status`,
+`opencode_formatter_status`, `opencode_tool_ids`, `opencode_tool_list`,
+and `opencode_log`. Everything else is mapped onto the v2 API.
+See [compatibility.md](compatibility.md) for the wire map and evidence.
 
 Every tool accepts an optional `directory` parameter. It must be an
 **absolute existing directory**. `~` and relative paths are rejected. When

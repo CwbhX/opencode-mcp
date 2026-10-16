@@ -1,220 +1,135 @@
 # Compatibility
 
-Inventory of the MCP surface against the OpenCode HTTP contract used by this
-bridge. Prepared for **opencode-mcp 1.12.0**.
+Inventory of the MCP surface against the OpenCode **v2** HTTP contract used
+by this bridge. Prepared for **opencode-mcp 2.0.0**.
 
-This is an inventory plus the verification that has actually been run. It is
-**not** a certificate of every tool, OS, or future OpenCode release. Rows
-record the request the bridge sends, the capability required, which named
-tests exist, and what has been verified.
+This release targets OpenCode v2 only. A v1 server is detected at probe
+time and reported as incompatible — it is never silently driven with v2
+requests. Verified against OpenCode **v2.0.28** (live binary); the wire
+contract was taken from that server's `/openapi.json` plus live captures
+of session, prompt, message, and SSE event payloads.
 
 ## Evidence labels
 
 | Label | Meaning |
 |---|---|
-| Source-confirmed | Bridge code matches the inspected OpenCode ~1.18 session/prompt/status/question contract. |
-| Layer A | Unit/contract tests against repository modules (serializers, status reducer, task manager, transport). |
-| Layer B | HTTP-client tests in `tests/integration/http-transport-wire.test.ts` **plus** MCP stdio tests in `tests/integration/mcp-stdio.test.ts` against a strict local fake. Not a real OpenCode process. |
-| Layer C | Real tagged OpenCode **v1.18.29** process. Opt-in: `OPENCODE_MCP_SERVER_TEST=1` and `OPENCODE_MCP_SERVER_BINARY=/absolute/path`. Missing opt-in is a skip, not a pass. Opt-in with a missing/wrong binary fails. |
+| Layer A | Unit/contract tests against repository modules (translation in `src/v2-adapt.ts`, client routing, status reducer, task manager, transport). |
+| Layer B | Wire tests in `tests/integration/http-transport-wire.test.ts` plus MCP stdio tests in `tests/integration/mcp-stdio.test.ts` against a strict local fake speaking v2 shapes. Not a real OpenCode process. |
+| Layer C | Real OpenCode v2 process. Opt-in: `OPENCODE_MCP_SERVER_TEST=1` and `OPENCODE_MCP_SERVER_BINARY=/absolute/path`. Missing opt-in is a skip, not a pass. Opt-in with a missing/non-v2 binary fails. |
 | Layer D | Live model smoke through MCP `opencode_fire` → `opencode_wait`. Opt-in: `OPENCODE_MCP_LIVE_TEST=1`. Explicit opt-in with missing configuration fails. |
 | Not exercised | No automated pass in this checkout for that row. A skip is not a pass. |
 
-**Comparison target:** OpenCode stable **v1.18.29** (source + implementation brief). Running `/global/health` and `/doc` can differ from `opencode --version` if another process is bound to the port.
+## Behavioral contract
 
-## Behavioral contract (honest)
+- **OpenCode v2 is required.** Health is `GET /api/info` reporting
+  `version: "2.x"`. The v2 web SPA answering HTML on unknown GET paths is
+  classified incompatible, never healthy.
+- **Authentication is mandatory.** v2 `serve` requires HTTP Basic auth
+  (username `opencode`, password from `OPENCODE_SERVER_PASSWORD`). When
+  the bridge auto-starts a server and no password is configured, it
+  generates one and uses it for both the child process and the client.
+  Against an externally managed server, set `OPENCODE_SERVER_PASSWORD`
+  to that server's password. HTTP 401/403 never triggers a spawn.
+- **Auto-start spawns `opencode serve` directly** (binary from
+  `OPENCODE_BINARY` or PATH), only when the probe is connection-refused
+  and the configured host is loopback. There is no `@opencode-ai/sdk`
+  dependency anymore. Jobs from `opencode_fire` do not survive the MCP
+  process exiting; use a separately managed `opencode serve` for
+  long-lived work.
+- **`directory` must be an existing absolute path.** It is sent as the
+  v2 `location[directory]` query parameter (or as `location.directory`
+  on session create). Session-scoped calls are located by the session
+  itself. `~` and relative paths are rejected.
+- **`opencode_fire` is accepted dispatch only.** It returns `jobId`,
+  `sessionId`, `requestMessageID`, `directory`. The request message id
+  is submitted as the v2 prompt `id`; assistants are correlated to it
+  by message order. Use `opencode_check` / `opencode_wait` with the
+  handle.
+- **Absence from the active-session list is not Done.** Completion still
+  requires a correlated terminal assistant (or an attributed error).
+  A failed/interrupted v2 `idle` marker becomes an error result, never
+  an empty success.
+- **Model identity is a full pair**, applied per session via
+  `POST /api/session/{id}/model` with a `Model.Ref`
+  `{id, providerID, variant?}`. Variant keys come from the model's
+  v2 `variants` array — discover with `opencode_provider_models`.
+  There is no paid-model fallback and no hardcoded free-model list.
+- **Questions are v2 forms.** `opencode_question_*` lists pending
+  forms and maps positional label answers onto form field keys
+  (resolving option labels to values). Rejecting cancels the form.
+  Permission replies send `{decision}` to the session-scoped v2 route.
+  Nothing is auto-approved to make a wait succeed.
+- **Mutating HTTP calls are not retried.** A dropped response after a
+  POST is ambiguous acceptance (`safeToResubmit: false`).
+- **`readOnlyHint` is not a sandbox.**
 
-- **`opencode_fire`** is accepted dispatch only. It returns a handle:
-  `jobId`, `sessionId`, `requestMessageID`, `directory`. The model may still
-  be running. Use `opencode_check` / `opencode_wait` with that handle
-  (`jobId`, or `sessionId` + `requestMessageID` + `directory`).
-- **Idle or a missing `/session/status` entry is not Done.** Absence is
-  untracked/indeterminate, not success.
-- **Do not set global `permission: "allow"`** as the default headless
-  workaround. List pending requests and reply explicitly
-  (`once` / `always` / `reject`) or use scoped OpenCode permission rules.
-- **Auto-started OpenCode is an SDK child process on loopback**, not an
-  in-process engine. Jobs from `fire` do **not** survive this MCP process
-  exiting. Use a separately managed `opencode serve` for shared or long-lived
-  work.
-- **Auto-start** runs only when the health probe is **connection-refused**
-  **and** the configured host is loopback (`127.0.0.1`, `localhost`, `::1`).
-  HTTP **401/403 does not spawn** another server.
-- **`directory` must be an existing absolute path.** `~` and relative paths
-  are rejected. Literal `%` path segments are rejected as unsupported. Omitted
-  `directory` uses the OpenCode server's project context, not this MCP
-  process's cwd.
-- **Model identity is a full pair.** A single `providerID` or `modelID` is
-  rejected and is not merged with defaults. There is no paid-model fallback
-  and no hardcoded free-model list. Discover providers with `opencode_setup`
-  / `opencode_provider_list`. Discover thinking/effort **variant** keys with
-  `opencode_provider_models` (per-model; omit `variant` for the catalog
-  default). Init, summarize, and shell reject `variant`.
-- **`OPENCODE_REQUIRE_EXPLICIT_MODEL=true`** requires an explicit or
-  configured full pair. **`OPENCODE_ALLOWED_MODELS`** is a JSON array of
-  `provider/model` strings (for example
-  `["opencode/muse-spark-1.3-contributor-free"]`).
-- **Question tools exist:** `opencode_question_list`,
-  `opencode_question_reply`, `opencode_question_reject`.
-- **TUI tools need an attached TUI.** Headless `opencode serve` without a TUI
-  will fail those calls.
-- **Mutating HTTP calls are not retried.** A dropped response after a POST
-  is ambiguous acceptance (`safeToResubmit: false`), not a signal to replay.
-- **`readOnlyHint` is not a sandbox.** A `plan` agent is not guaranteed
-  write-incapable unless OpenCode permissions actually block writes.
+## Wire translation map (internal path → v2)
 
-## Prompt / command payload shapes (~1.18)
+Tools address stable internal paths; `src/client.ts` + `src/v2-adapt.ts`
+translate to and from the v2 wire (`{data}` envelopes unwrapped,
+sessions gain `directory`, messages become `{info, parts}`). Highlights:
 
-| Operation | Endpoint | Request shape | Response |
-|---|---|---|---|
-| Create session | `POST /session` | Optional `title` (and other validated creation fields) | Session with `id` |
-| Sync prompt | `POST /session/{id}/message` | `parts`, optional `messageID`, `model: {providerID, modelID}`, top-level `variant`, `agent`, `system`, `noReply` | Prompt response (waits) |
-| Async prompt | `POST /session/{id}/prompt_async` | Same prompt payload | **204 = dispatch accepted**, not task succeeded |
-| Slash command | `POST /session/{id}/command` | `command`, `arguments`, optional `model` as `"provider/model"` string, top-level `variant`, `agent`, `messageID` | Command response |
-| Shell | `POST /session/{id}/shell` | `command`, required `agent`, optional model **object**; `variant` is rejected by the bridge | Shell response |
-| Summarize | `POST /session/{id}/summarize` | `providerID`, `modelID`, optional `auto`; `variant` is rejected by the bridge | Boolean / accepted |
-| Status | `GET /session/status` | Directory header | Map of `idle` / `busy` / `retry`; **absence ≠ success** |
-| Messages | `GET /session/{id}/message` | Optional `limit` query | Messages with `info` + `parts` |
-| Permissions | `GET /permission` | Directory header | Pending requests |
-| Permission reply | `POST /permission/{requestID}/reply` | `{ reply }` (`once` / `always` / `reject`); legacy session route only if the primary route is unambiguously missing | Boolean / accepted |
-| Questions | `GET /question` | Directory header | Pending question requests |
-| Question reply | `POST /question/{requestID}/reply` | `{ answers }` — array of selected-label arrays, one inner array per question, in order | Boolean / accepted |
-| Question reject | `POST /question/{requestID}/reject` | No invented body | Boolean / accepted |
+| Internal | v2 wire |
+|---|---|
+| `GET /global/health` | `GET /api/info` → `{healthy, version}` |
+| `POST /session/{id}/message` (sync) | set model/agent → `POST /api/session/{id}/prompt` → `POST /api/experimental/session/{id}/wait` → fetch messages |
+| `POST /session/{id}/prompt_async` | set model/agent → `POST /api/session/{id}/prompt` (accepted dispatch) |
+| `POST /session/{id}/command` | set model/agent → `POST /api/session/{id}/command {name, text}` → wait → last assistant |
+| `POST /session/{id}/shell` | `POST /api/session/{id}/shell` → wait → shell message output |
+| `POST /session/{id}/summarize` | set model → `POST /api/session/{id}/compact` |
+| `POST /session/{id}/init` | set model → `POST /api/session/{id}/command {name:"init"}` |
+| `POST /session/{id}/abort` | `POST /api/session/{id}/interrupt` |
+| `GET /session/status` | synthesized from `GET /api/session/active` (running → busy) |
+| `GET /session/{id}/message` | `GET /api/session/{id}/message?order=asc`, translated with synthesized `parentID` |
+| `GET /provider` | synthesized from `GET /api/model` + `/api/provider` + `/api/integration` + `/api/model/default`; a provider counts as configured with an integration connection or an explicit provider entry |
+| `GET /provider/auth` | integration methods |
+| OAuth / `PUT /auth/{id}` | `POST /api/integration/{id}/connect/oauth[/{attempt}/complete]`, `.../connect/key` |
+| `GET /permission`, reply | `GET /api/permission/request`; `POST /api/session/{id}/permission/{id}/reply {decision}` |
+| `GET /question`, reply, reject | `GET /api/form`; `POST /api/session/{id}/form/{id}/reply {answer}`; `DELETE .../form/{id}` |
+| `GET /find/file`, `/file`, `/file/content`, `/file/status` | `GET /api/fs/find`, `/api/fs/list`, `/api/fs/read/*` (raw text), `/api/vcs/status` |
+| `GET /project[/current]`, `/path` | `GET /api/project`, `GET /api/location` |
+| `GET/PATCH /config` | `GET /api/config` (config documents), `PATCH /api/experimental/config` (**only `{shell}` is accepted by v2**) |
+| `GET /mcp`, `POST /mcp` | `GET /api/mcp`, `PUT /api/experimental/mcp/{server}` |
+| `POST /instance/dispose` | `POST /api/location/reload` |
+| `GET /event` (SSE) | `GET /api/event`, v2 `{id, type, data}` envelopes |
+| revert / unrevert | `POST /api/session/{id}/revert/stage` + `/revert/commit`; `DELETE .../revert` |
 
-## Tool inventory
+## Not available on v2 (clear tool error, no wire call)
 
-Registered count from `src/tools/*.ts`: **83 tools** (13 workflow + 3
-question + 67 other), plus **10 resources** and **6 prompts**.
+These tools remain registered so clients get an explicit
+"not available on OpenCode v2" error instead of a silent failure:
 
-`directory` on every tool is sent as `x-opencode-directory` when valid.
+- `opencode_tui_*` (9 tools) — v2 has no remote TUI-control endpoints.
+- `opencode_session_todo` — no todo endpoint in v2.
+- `opencode_session_share` / `opencode_session_unshare` — no share API.
+- `opencode_find_text` (content grep) and `opencode_find_symbol` —
+  v2 `fs/find` is file-name search only.
+- `opencode_lsp_status`, `opencode_formatter_status`,
+  `opencode_tool_ids`, `opencode_tool_list`, `opencode_log` — no
+  corresponding v2 server endpoints.
+- `opencode_config_update` for anything other than `{shell}` — the v2
+  config patch endpoint accepts only the shell setting.
 
-| Tool / resource | Endpoint(s) | Request / response contract | Required capability | Test IDs | Verified version | Result / limitation |
-|---|---|---|---|---|---|---|
-| `opencode_setup` | `GET /global/health`, `GET /provider`, `GET /provider/auth`, `GET /project/current` | Read-only dashboard; no model mutation | Reachable OpenCode | START-01 (A), PACKAGE-02 | ~1.18.29 source | Discovers providers; does not invent a free-model list |
-| `opencode_ask` | `POST /session`, `POST /session/{id}/message` | Prompt body via `buildPromptBody`; waits for sync response | Configured provider/model pair | MODEL-01 (A/B), MODEL-03 (A) | ~1.18.29 source + Layer B serializers | Sync wait; not a job handle |
-| `opencode_reply` | `GET /session/{id}`, `POST /session/{id}/message` | Same prompt body; session/directory must match | Existing session + model pair | DIR-03 (A), MODEL-01 (A/B) | ~1.18.29 source | Rejects session/directory mismatch before prompt |
-| `opencode_run` | `POST /session` (if needed), `POST /session/{id}/prompt_async`, then status/messages/events | One deadline for submit+wait; returns correlated result or block/timeout | Model pair; job registry in this MCP process | ASYNC-01/02 (A), DEADLINE-03 (A), JOB-* (A) | ~1.18.29 source + Layer A | Timeout does not abort server work; idle ≠ Done |
-| `opencode_fire` | `POST /session` (if needed), `POST /session/{id}/prompt_async` | **204 accepted**; returns `jobId` / `sessionId` / `requestMessageID` / `directory` | Model pair; MCP process must stay up | ASYNC-01/02 (A/B), WIRE-01 (B), REPLAY-01 (A/B), FUP-060 (D) | 1.18.29 Layer D live fire→wait | Handle only. Does not survive MCP exit |
-| `opencode_check` | `GET /session/{id}`, `GET /session/status`, `GET /session/{id}/todo`, `GET /session/{id}/diff`, `GET /session/{id}/message` | Observe handle; session-only is untracked | Handle from fire/run, or recovery tuple | JOB-01/02/08/11 (A) | ~1.18.29 source | Idle/absent is not Done |
-| `opencode_wait` | Same reads + event monitor | Wait until terminal, blocked, timed out, or cancelled | Same as check | DEADLINE-03/05 (A), BLOCK-01 (A), FUP-060 (D) | 1.18.29 Layer D live fire→wait | Timeout ≠ abort; blocked is not a tool error |
-| `opencode_conversation` | `GET /session/{id}/message` | Formatted history | Session exists | — | ~1.18.29 source | Read-only; not a completion signal |
-| `opencode_sessions_overview` | `GET /session`, `GET /session/status` | List + status map | OpenCode | JOB-08 (A) | ~1.18.29 source | Status objects rendered; idle ≠ this-task Done |
-| `opencode_context` | `GET /project/current`, `/path`, `/vcs`, `/config`, `/agent` | Combined snapshot | OpenCode + optional directory | DIR-04 (A) | ~1.18.29 source | Some inner GETs are best-effort |
-| `opencode_review_changes` | `GET /session/{id}/diff` | Optional `messageID` query | Session | — | ~1.18.29 source | Read-only |
-| `opencode_provider_test` | `GET /provider`, `POST /session`, `POST /session/{id}/message`, `DELETE /session/{id}` | Tests the requested or that provider's listed default — never another provider | Named provider + a model on it | MODEL-06 (A), MODEL-08 (A) | ~1.18.29 source | No paid fallback if the selected model is absent |
-| `opencode_status` | `GET /global/health`, `/provider`, `/session`, `/vcs` | Dashboard | OpenCode | — | ~1.18.29 source | Read-only |
-| `opencode_health` | `GET /global/health` | `{ healthy, version }` | OpenCode | START-01/03 (A) | ~1.18.29 source | 401 is auth failure, not "down" |
-| `opencode_session_list` | `GET /session` | Session array | OpenCode | — | ~1.18.29 source | Scoped by directory header |
-| `opencode_session_create` | `POST /session` | `{ title? }` | OpenCode | REPLAY-02 (A intent), FUP-058 (C) | 1.18.29 Layer C isolated serve | Mutation; no automatic replay |
-| `opencode_session_get` | `GET /session/{id}` | Session object | Session exists | JOB-01 (A) | ~1.18.29 source | 404 is missing, not Done |
-| `opencode_session_delete` | `DELETE /session/{id}` | Destructive | Session exists | — | ~1.18.29 source | Not live-tested against a user server |
-| `opencode_session_update` | `PATCH /session/{id}` | `{ title? }` | Session exists | — | ~1.18.29 source | |
-| `opencode_session_search` | `GET /session` | Client-side title filter | OpenCode | — | ~1.18.29 source | Not a server search index |
-| `opencode_session_children` | `GET /session/{id}/children` | Child sessions | Session exists | — | ~1.18.29 source | |
-| `opencode_session_status` | `GET /session/status` | Status map | OpenCode | JOB-08 (A) | ~1.18.29 source | Missing key ≠ success |
-| `opencode_session_todo` | `GET /session/{id}/todo` | Todo list | Session exists | — | ~1.18.29 source | |
-| `opencode_session_init` | `POST /session/{id}/init` | `{ messageID, providerID, modelID }` only; explicit `variant` is rejected locally | Session + model | FUP-003 (A/B) | ~1.18.29 source + Layer B | No `variant` field sent |
-| `opencode_session_abort` | `POST /session/{id}/abort` | Session-wide abort (not job-specific) | Session exists | — | ~1.18.29 source | Does not claim a specific job was aborted |
-| `opencode_session_fork` | `POST /session/{id}/fork` | Optional `messageID` | Session exists | — | ~1.18.29 source | |
-| `opencode_session_share` | `POST /session/{id}/share` | Public share | Session exists | — | ~1.18.29 source | **Not exercised** against a user server |
-| `opencode_session_unshare` | `DELETE /session/{id}/share` | Unshare | Session exists | — | ~1.18.29 source | **Not exercised** |
-| `opencode_session_diff` | `GET /session/{id}/diff` | Optional `messageID` | Session exists | — | ~1.18.29 source | |
-| `opencode_session_summarize` | `POST /session/{id}/summarize` | `{ providerID, modelID, auto? }`; variant rejected | Model pair | MODEL-05 (A) | ~1.18.29 source | No `variant` field sent |
-| `opencode_session_revert` | `POST /session/{id}/revert` | `{ messageID, partID? }` | Session exists | — | ~1.18.29 source | Destructive |
-| `opencode_session_unrevert` | `POST /session/{id}/unrevert` | Empty body | Session exists | — | ~1.18.29 source | |
-| `opencode_permission_list` | `GET /permission` | Pending requests | OpenCode | BLOCK-01/03 (A) | ~1.18.29 source | No auto-approval |
-| `opencode_session_permission` | `POST /permission/{id}/reply`; fallback `POST /session/{id}/permissions/{id}` | `{ reply }` enum; legacy only if primary route is unambiguously missing | Pending request | BLOCK-04 (A intent) | ~1.18.29 source | Auth/timeout is **not** treated as "route missing" |
-| `opencode_message_list` | `GET /session/{id}/message` | Optional `limit` query | Session exists | WIRE-01 GET query (B) | ~1.18.29 source + Layer B query | |
-| `opencode_message_get` | `GET /session/{id}/message/{messageId}` | One message | Session exists | — | ~1.18.29 source | |
-| `opencode_message_send` | `GET /session/{id}`, `POST /session/{id}/message` | `buildPromptBody`; sync wait | Session + model pair | MODEL-01 (A/B) | ~1.18.29 source + Layer B | `noReply` is injection, not a generated result (JOB-13) |
-| `opencode_message_send_async` | `POST /session/{id}/prompt_async` | Same prompt body; 204; returns job handle | Session + model pair | ASYNC-02 (A), WIRE-01 (B) | ~1.18.29 source + Layer B | Prefer `opencode_wait` with the handle |
-| `opencode_command_execute` | `POST /session/{id}/command` | `model` is `"provider/model"` string | Session | MODEL-02 (A/B) | ~1.18.29 source + Layer B | Fake/server **rejects** a model object |
-| `opencode_shell_execute` | `POST /session/{id}/shell` | Model **object**; `variant` rejected | Session + `agent` | MODEL-05 (A) | ~1.18.29 source | |
-| `opencode_question_list` | `GET /question` | Pending question requests | OpenCode | BLOCK-02 (A intent) | ~1.18.29 source | New in 1.12.0 |
-| `opencode_question_reply` | `POST /question/{requestID}/reply` | `{ answers: string[][] }` in question order | Pending question | BLOCK-02 (A intent) | ~1.18.29 source | Do not invent answers to finish a wait |
-| `opencode_question_reject` | `POST /question/{requestID}/reject` | No body | Pending question | — | ~1.18.29 source | |
-| `opencode_find_text` | `GET /find?pattern=` | Regex search | Project directory | — | ~1.18.29 source | |
-| `opencode_find_file` | `GET /find/file` | Fuzzy name query | Project directory | — | ~1.18.29 source | |
-| `opencode_find_symbol` | `GET /find/symbol?query=` | Workspace symbols | Project + LSP | — | ~1.18.29 source | Needs LSP |
-| `opencode_file_list` | `GET /file` | Path query | Project directory | DIR-01 (A) | ~1.18.29 source | |
-| `opencode_file_read` | `GET /file/content?path=` | File content | Project directory | — | ~1.18.29 source | |
-| `opencode_file_status` | `GET /file/status` | VCS file status | Git project | — | ~1.18.29 source | |
-| `opencode_config_get` | `GET /config` | Config object | OpenCode | — | ~1.18.29 source | |
-| `opencode_config_update` | `PATCH /config` | Partial merge | OpenCode | — | ~1.18.29 source | Do not use this to set global `permission: "allow"` as a default workaround |
-| `opencode_config_providers` | `GET /config/providers` | Configured providers | OpenCode | — | ~1.18.29 source | |
-| `opencode_provider_list` | `GET /provider` | Live provider list | OpenCode | PACKAGE-02 (A) | ~1.18.29 source | No stale hardcoded free-model catalog |
-| `opencode_provider_models` | `GET /provider` | Models **and variant keys** for one provider | Provider id | — | ~1.18.29 source | Discover at call time |
-| `opencode_provider_auth_methods` | `GET /provider/auth` | Auth methods | OpenCode | — | ~1.18.29 source | |
-| `opencode_provider_oauth_authorize` | `POST /provider/{id}/oauth/authorize` | Start OAuth | Interactive user | — | ~1.18.29 source | **Not exercised** (no real OAuth in tests) |
-| `opencode_provider_oauth_callback` | `POST /provider/{id}/oauth/callback` | Callback payload | Interactive user | — | ~1.18.29 source | **Not exercised** |
-| `opencode_auth_set` | `PUT /auth/{providerId}` | `{ type, key }` | Credentials | — | ~1.18.29 source | **Not exercised** against a user store |
-| `opencode_tui_append_prompt` | `POST /tui/append-prompt` | `{ text }` | **Attached TUI** | — | conditional | Fails on headless server without TUI |
-| `opencode_tui_submit_prompt` | `POST /tui/submit-prompt` | Empty | **Attached TUI** | — | conditional | Same |
-| `opencode_tui_clear_prompt` | `POST /tui/clear-prompt` | Empty | **Attached TUI** | — | conditional | Same |
-| `opencode_tui_execute_command` | `POST /tui/execute-command` | `{ command }` | **Attached TUI** | — | conditional | Same |
-| `opencode_tui_show_toast` | `POST /tui/show-toast` | `{ message, title?, variant? }` | **Attached TUI** | — | conditional | Same |
-| `opencode_tui_open_help` | `POST /tui/open-help` | Empty | **Attached TUI** | — | conditional | Same |
-| `opencode_tui_open_sessions` | `POST /tui/open-sessions` | Empty | **Attached TUI** | — | conditional | Same |
-| `opencode_tui_open_models` | `POST /tui/open-models` | Empty | **Attached TUI** | — | conditional | Same |
-| `opencode_tui_open_themes` | `POST /tui/open-themes` | Empty | **Attached TUI** | — | conditional | Same |
-| `opencode_path_get` | `GET /path` | Working path | OpenCode | — | ~1.18.29 source | |
-| `opencode_vcs_info` | `GET /vcs` | Git info | Git project | — | ~1.18.29 source | |
-| `opencode_instance_dispose` | `POST /instance/dispose` | Destructive instance shutdown | OpenCode | START-06 (A intent) | ~1.18.29 source | Not the same as exiting this MCP process |
-| `opencode_agent_list` | `GET /agent` | Agents | OpenCode | — | ~1.18.29 source | `plan` is not a write sandbox |
-| `opencode_command_list` | `GET /command` | Slash commands | OpenCode | — | ~1.18.29 source | |
-| `opencode_lsp_status` | `GET /lsp` | LSP servers | OpenCode | — | ~1.18.29 source | |
-| `opencode_formatter_status` | `GET /formatter` | Formatters | OpenCode | — | ~1.18.29 source | |
-| `opencode_mcp_status` | `GET /mcp` | Nested MCP servers | OpenCode | — | ~1.18.29 source | |
-| `opencode_mcp_add` | `POST /mcp` | `{ name, config }` | OpenCode | — | ~1.18.29 source | |
-| `opencode_tool_ids` | `GET /experimental/tool/ids` | Experimental | OpenCode | — | experimental | May change |
-| `opencode_tool_list` | `GET /experimental/tool` | `provider` + `model` query | OpenCode | — | experimental | May change |
-| `opencode_log` | `POST /log` | `{ service, level, message, extra? }` | OpenCode | — | ~1.18.29 source | |
-| `opencode_events_poll` | `GET /event` (SSE) | Collect for `durationMs` | OpenCode SSE | EVENT-01/03/04 (A) | ~1.18.29 source | **Directory header is not forwarded** on this SSE subscribe |
-| `opencode_project_list` | `GET /project` | Known projects | OpenCode | — | ~1.18.29 source | |
-| `opencode_project_init` | `GET /project/current` after mkdir | Absolute path; deny-list + realpath | Writable host path | DIR-04/06 (A) | ~1.18.29 source | Rejects `~`, relative, control bytes, system roots |
-| `opencode_project_current` | `GET /project/current` | Active project | Directory header | — | ~1.18.29 source | |
-| `opencode://project/current` | `GET /project/current` | JSON resource | OpenCode | — | ~1.18.29 source | |
-| `opencode://config` | `GET /config` | JSON resource | OpenCode | — | ~1.18.29 source | |
-| `opencode://providers` | `GET /provider` | JSON resource | OpenCode | — | ~1.18.29 source | Live list, not a cached free-model table |
-| `opencode://agents` | `GET /agent` | JSON resource | OpenCode | — | ~1.18.29 source | |
-| `opencode://commands` | `GET /command` | JSON resource | OpenCode | — | ~1.18.29 source | |
-| `opencode://health` | `GET /global/health` | JSON resource | OpenCode | START-01 (A) | ~1.18.29 source | |
-| `opencode://vcs` | `GET /vcs` | JSON resource | Git project | — | ~1.18.29 source | |
-| `opencode://sessions` | `GET /session` | JSON resource | OpenCode | — | ~1.18.29 source | |
-| `opencode://mcp-servers` | `GET /mcp` | JSON resource | OpenCode | — | ~1.18.29 source | |
-| `opencode://file-status` | `GET /file/status` | JSON resource | Git project | — | ~1.18.29 source | |
+Everything else (83 tools total, 10 resources, 6 prompts) is mapped.
 
-## Layer status for this release
+## Verification recorded for 2.0.0
 
-Recorded for OpenCode **v1.18.29** against this unreleased follow-up (package
-still labeled `1.12.0`). Host user, home path, OS, and CPU are not part of
-the contract.
+- `npx tsc --noEmit` — clean.
+- `npm run test:unit` — 595+ passed including new `tests/v2-client.test.ts`
+  (message correlation, failed-idle errors, provider synthesis, form
+  answers, sync/async prompt composites, unsupported-endpoint errors).
+- `npm run test:wire` — v2 wire fake (7) + MCP stdio subprocess (7) pass.
+- Layer C against the installed v2.0.28 binary — isolated serve + MCP
+  `session_create` pass.
+- Layer D live smoke — MCP `fire` → `wait` succeeded with
+  requested = observed model (`openrouter/meta/muse-spark-open`) and
+  `state=succeeded`.
+- Manual MCP exercise against an auto-started v2.0.28: health, setup,
+  ask, provider models (with variants), file list/read, session list,
+  status, question/permission lists, resources all returned live data.
 
-| Layer | How to run | Status |
-|---|---|---|
-| A — unit/contract | `npm run test:unit` | Passed (598 tests, 1 skipped). Serializers, transport, task manager, status, directory, startup probe, live-result validator, variant catalog listing. |
-| B — HTTP + MCP stdio | `npm run test:wire` | Passed (14 tests). HTTP-client fake **and** spawned `node dist/index.js` over MCP stdio against a strict fake OpenCode. Not a real OpenCode process. |
-| C — tagged OpenCode v1.18.29 | `OPENCODE_MCP_SERVER_BINARY=… OPENCODE_MCP_SERVER_TEST=1 npm run test:server` | Passed FUP-055 (binary `1.18.29`) and isolated serve + MCP `session_create` (health version `1.18.29`). Skip without opt-in is not a pass. Opt-in + missing/wrong binary fails. FUP-056 (localhost provider fixture, delayed async completion, two-step tool turn) is **not** implemented. |
-| D — live model | `OPENCODE_MCP_LIVE_TEST=1 OPENCODE_AUTO_SERVE=false … npm run test:live` | Passed one MCP `opencode_fire` → `opencode_wait` probe against a separately managed `opencode serve` **1.18.29**. Requested and observed pair: `opencode/muse-spark-1.3-contributor-free`. `state=succeeded`, `terminal=true`. Skip without opt-in is not a pass. Opt-in with missing config fails. This is not a certification of every tool or of later OpenCode versions. |
-
-Machine-readable command evidence lives in `verification-summary.json`.
-
-## Dependency audit (recorded, not dismissed)
-
-`npm audit` against this lockfile reported **16** advisories total and **9**
-with `--omit=dev`.
-
-Production path is `@modelcontextprotocol/sdk@1.26.0` (stdio MCP). This
-package's entrypoint does not start Hono `serveStatic` or Express. Residual
-risk is transitive:
-
-| Advisory area | Severity | Reachability | Mitigation / residual |
-|---|---|---|---|
-| `hono`, `@hono/node-server` | high | Transitive via MCP SDK | Not used by this stdio bridge. No independent bump without an SDK upgrade. |
-| `express`, `express-rate-limit`, `path-to-regexp`, `body-parser`, `qs`, `ip-address` | high/moderate/low | Transitive via MCP SDK HTTP/SSE stack | Same: unused by `node dist/index.js` stdio. |
-| `ajv`, `fast-uri` | moderate/high | Transitive JSON schema stack | Same. |
-| `vitest`, `vite`, `rollup`, `esbuild`, `picomatch`, `postcss`, `nanoid` | critical–low | Dev-only (`npm audit --omit=dev` drops them) | Not shipped. Vitest UI server is not started by `npm test`. |
-
-No `npm audit fix --force` was applied. Accepted residual: wait for
-`@modelcontextprotocol/sdk` to pick up patched transitives, or pin after a
-compatibility retest. Do not treat “16 vulnerabilities” as harmless hygiene
-or as proof the MCP process is remotely exploitable.
+Known gaps: OAuth connect flows and form/permission replies are
+covered by Layer A/B fakes, not exercised against a live OAuth
+provider or a live blocked session in this pass. Shell results are
+read back from session messages after the wait endpoint; very long
+shell output follows the server's own truncation.

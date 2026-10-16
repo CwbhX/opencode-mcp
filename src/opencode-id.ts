@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 /**
- * OpenCode Identifier.ascending layout from v1.18.29:
+ * OpenCode ascending identifier layout (kept in v2):
  *   prefix + "_" + 12-char hex (6 timestamp bytes) + 14-char base62
  *
  * Message IDs use prefix `msg`. The persisted schema only checks

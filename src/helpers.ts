@@ -25,7 +25,7 @@ export const destructive = { readOnlyHint: false, destructiveHint: true } as con
 
 /**
  * Shared Zod parameter for project directory targeting.
- * When provided, sent as the x-opencode-directory header so the
+ * When provided, sent as the v2 `location[directory]` parameter so the
  * OpenCode server scopes the request to that project.
  */
 export const directoryParam = z
@@ -85,7 +85,7 @@ export function applyModelDefaults(
 /**
  * Normalize and validate a directory path:
  *  - Rejects NUL bytes and CR/LF (defense-in-depth against header injection
- *    when the path is forwarded as `x-opencode-directory`).
+ *    when the path is forwarded to the server).
  *  - Resolves to absolute (handles "..", ".", trailing slashes, and
  *    converts relative inputs against `process.cwd()`).
  *  - Confirms the resolved path is absolute for the current platform.
@@ -107,7 +107,7 @@ export function normalizeDirectory(directory?: string): string | undefined {
   if (!directory) return undefined;
 
   // Reject control bytes that could smuggle headers when this value is
-  // forwarded as `x-opencode-directory`. Node's `undici` rejects CR/LF in
+  // forwarded to the server. Node's `undici` rejects CR/LF in
   // header values, but defending here keeps the contract explicit and
   // protects against future runtime changes or non-fetch transports.
   if (/[\0\r\n]/.test(directory)) {
@@ -161,6 +161,11 @@ export function formatMessageResponse(response: unknown): string {
         case "text":
           sections.push(part.text ?? part.content ?? "");
           break;
+        case "reasoning":
+          // Model thinking traces are not answer content; omit them so
+          // ask/run output stays the reply, not the deliberation.
+          break;
+        case "tool":
         case "tool-invocation":
         case "tool-result":
           sections.push(
@@ -230,7 +235,8 @@ export function formatMessageList(
         .join("\n");
 
       const toolParts = parts.filter(
-        (p: any) => p.type === "tool-invocation" || p.type === "tool-result",
+        (p: any) =>
+          p.type === "tool" || p.type === "tool-invocation" || p.type === "tool-result",
       );
 
       // Extract cost/token metadata from step-finish parts

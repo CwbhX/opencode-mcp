@@ -3,7 +3,9 @@
  *
  * Launch the built `node dist/index.js` and talk to it through the MCP SDK
  * stdio client. The OpenCode HTTP/SSE service behind it is a strict local
- * fake. This is not a tagged OpenCode process.
+ * fake speaking the v2 wire (envelope `{data}`, `/api/...` routes,
+ * `location[directory]` scoping, per-session model). This is not a tagged
+ * OpenCode process.
  *
  * Covered IDs: FUP-001, FUP-013, FUP-016, FUP-042, FUP-053, FUP-054.
  */
@@ -23,8 +25,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const DIST = path.join(ROOT, "dist", "index.js");
 const WORK_DIR = tmpdir();
 const MODEL = {
-  providerID: "opencode",
-  modelID: "muse-spark-1.3-contributor-free",
+  providerID: "openrouter",
+  modelID: "meta/muse-spark-open",
 } as const;
 
 interface RecordedRequest {
@@ -61,7 +63,7 @@ function startFake(options?: { assistantMode?: AssistantMode; health?: "healthy"
     });
     req.on("end", () => {
       const rawBody = Buffer.concat(chunks).toString("utf8");
-      const directory = String(req.headers["x-opencode-directory"] ?? "");
+      const directory = parsed.searchParams.get("location[directory]") ?? "";
       let parsedBody: unknown;
       if (rawBody.length > 0) {
         try {
@@ -82,140 +84,156 @@ function startFake(options?: { assistantMode?: AssistantMode; health?: "healthy"
       requests.push(recorded);
       if (method !== "GET" && method !== "HEAD") mutationCount += 1;
 
-      if (options?.health === "down" && parsed.pathname === "/global/health") {
+      if (options?.health === "down" && parsed.pathname === "/api/info") {
         res.destroy();
         return;
       }
 
-      if (parsed.pathname === "/event") {
+      if (parsed.pathname === "/api/event") {
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
         });
-        res.write(`event: message\ndata: ${JSON.stringify({ type: "server.connected" })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id: "evt_1", type: "server.connected", data: {} })}\n\n`);
         sseSockets.add(res);
         req.on("close", () => sseSockets.delete(res));
         return;
       }
 
-      if (parsed.pathname === "/global/health") {
-        json(res, 200, { healthy: true, version: "1.18.29-fake" });
+      if (parsed.pathname === "/api/info") {
+        json(res, 200, { version: "2.0.28-fake", urls: ["http://127.0.0.1"] });
         return;
       }
 
-      if (method === "POST" && parsed.pathname === "/session") {
+      if (method === "POST" && parsed.pathname === "/api/session") {
         sessionSeq += 1;
         const id = `ses_mcp_${sessionSeq}`;
-        const session = { id, directory: directory || WORK_DIR };
+        const createBody = (parsedBody ?? {}) as {
+          location?: { directory?: string };
+        };
+        const session = {
+          id,
+          directory: createBody.location?.directory || directory || WORK_DIR,
+        };
         sessions.set(id, session);
         messages.set(id, []);
-        json(res, 200, session);
+        json(res, 200, {
+          data: {
+            id,
+            projectID: "proj_fake",
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: Date.now(), updated: Date.now() },
+            location: { directory: session.directory },
+          },
+        });
         return;
       }
 
-      const sessionMatch = parsed.pathname.match(/^\/session\/([^/]+)$/);
+      const sessionMatch = parsed.pathname.match(/^\/api\/session\/([^/]+)$/);
       if (method === "GET" && sessionMatch) {
         const session = sessions.get(sessionMatch[1]!);
         if (!session) {
-          res.writeHead(404, { "Content-Type": "text/plain" });
-          res.end("not found");
+          json(res, 404, { _tag: "SessionNotFoundError", message: "not found" });
           return;
         }
-        json(res, 200, session);
+        json(res, 200, {
+          data: {
+            id: session.id,
+            projectID: "proj_fake",
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: Date.now(), updated: Date.now() },
+            location: { directory: session.directory },
+          },
+        });
         return;
       }
 
-      const promptMatch = parsed.pathname.match(/^\/session\/([^/]+)\/prompt_async$/);
-      if (method === "POST" && promptMatch) {
-        const sessionId = promptMatch[1]!;
-        const body = (parsedBody ?? {}) as Record<string, unknown>;
-        const messageID = typeof body.messageID === "string" ? body.messageID : `msg_${Date.now()}`;
-        const parts = Array.isArray(body.parts) ? body.parts : [];
-        const textPart = parts.find((part) => {
-          return Boolean(part && typeof part === "object" && (part as { type?: string }).type === "text");
-        }) as { text?: string } | undefined;
-        const list = messages.get(sessionId) ?? [];
-        list.push({
-          info: { id: messageID, role: "user", time: { created: Date.now() } },
-          parts: [{ type: "text", text: textPart?.text ?? "" }],
-        });
-        if (assistantMode === "success") {
-          list.push({
-            info: {
-              id: `${messageID}_asst`,
-              role: "assistant",
-              parentID: messageID,
-              providerID: MODEL.providerID,
-              modelID: MODEL.modelID,
-              finish: "stop",
-              time: { created: Date.now(), completed: Date.now() + 1 },
-            },
-            parts: [{ type: "text", text: "ok from fake" }],
-          });
-        } else if (assistantMode === "failed") {
-          list.push({
-            info: {
-              id: `${messageID}_asst`,
-              role: "assistant",
-              parentID: messageID,
-              providerID: MODEL.providerID,
-              modelID: MODEL.modelID,
-              finish: "stop",
-              error: {
-                name: "ProviderAuthError",
-                data: { providerID: MODEL.providerID, message: "not authorized" },
-              },
-              time: { created: Date.now(), completed: Date.now() + 1 },
-            },
-            parts: [{ type: "text", text: "partial" }],
-          });
-        }
-        messages.set(sessionId, list);
+      if (method === "POST" && /\/api\/session\/[^/]+\/(model|agent)$/.test(parsed.pathname)) {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      if (method === "POST" && /\/api\/experimental\/session\/[^/]+\/wait$/.test(parsed.pathname)) {
         res.writeHead(204);
         res.end();
         return;
       }
 
-      const messageMatch = parsed.pathname.match(/^\/session\/([^/]+)\/message$/);
+      const promptMatch = parsed.pathname.match(/^\/api\/session\/([^/]+)\/prompt$/);
+      if (method === "POST" && promptMatch) {
+        const sessionId = promptMatch[1]!;
+        const body = (parsedBody ?? {}) as Record<string, unknown>;
+        if ("parts" in body || "model" in body || "variant" in body || typeof body.text !== "string") {
+          json(res, 400, { _tag: "InvalidRequestError", message: "v2 prompt requires {id?, text}" });
+          return;
+        }
+        const messageID = typeof body.id === "string" ? body.id : `msg_${Date.now()}`;
+        const list = messages.get(sessionId) ?? [];
+        list.push({ id: messageID, type: "user", text: body.text, time: { created: Date.now() } });
+        if (assistantMode === "success") {
+          list.push({
+            id: `${messageID}_asst`,
+            type: "assistant",
+            agent: "build",
+            model: { id: MODEL.modelID, providerID: MODEL.providerID, variant: "default" },
+            finish: "stop",
+            time: { created: Date.now(), completed: Date.now() + 1 },
+            content: [{ type: "text", text: "ok from fake" }],
+          });
+          list.push({ id: `${messageID}_idle`, type: "idle", outcome: "succeeded", time: { created: Date.now() + 2 } });
+        } else if (assistantMode === "failed") {
+          list.push({
+            id: `${messageID}_asst`,
+            type: "assistant",
+            agent: "build",
+            model: { id: MODEL.modelID, providerID: MODEL.providerID, variant: "default" },
+            finish: "error",
+            error: { type: "ProviderAuthError", message: "not authorized", status: 401 },
+            time: { created: Date.now(), completed: Date.now() + 1 },
+            content: [{ type: "text", text: "partial" }],
+          });
+        }
+        messages.set(sessionId, list);
+        json(res, 200, { data: { id: messageID, sessionID: sessionId, type: "user", payload: { text: body.text }, delivery: "steer", time: { created: Date.now() } } });
+        return;
+      }
+
+      const messageMatch = parsed.pathname.match(/^\/api\/session\/([^/]+)\/message$/);
       if (method === "GET" && messageMatch) {
-        json(res, 200, messages.get(messageMatch[1]!) ?? []);
-        return;
-      }
-
-      if (method === "POST" && parsed.pathname.endsWith("/command")) {
-        const body = (parsedBody ?? {}) as Record<string, unknown>;
-        if (typeof body.arguments !== "string") {
-          res.writeHead(400, { "Content-Type": "text/plain" });
-          res.end("command arguments must be a string");
+        if (!sessions.has(messageMatch[1]!)) {
+          json(res, 404, { _tag: "SessionNotFoundError", message: "not found" });
           return;
         }
-        json(res, 200, { ok: true });
+        json(res, 200, { data: messages.get(messageMatch[1]!) ?? [], cursor: {} });
         return;
       }
 
-      if (method === "POST" && parsed.pathname.endsWith("/init")) {
+      if (method === "POST" && /\/api\/session\/[^/]+\/command$/.test(parsed.pathname)) {
         const body = (parsedBody ?? {}) as Record<string, unknown>;
-        if ("variant" in body) {
-          res.writeHead(400, { "Content-Type": "text/plain" });
-          res.end("init must not include variant");
+        if (typeof body.name !== "string" || typeof body.text !== "string") {
+          json(res, 400, { _tag: "InvalidRequestError", message: "command requires {name, text}" });
           return;
         }
-        json(res, 200, { ok: true });
+        res.writeHead(204);
+        res.end();
         return;
       }
 
-      if (method === "POST" && parsed.pathname.endsWith("/abort")) {
-        json(res, 200, { ok: true });
+      if (method === "POST" && parsed.pathname.endsWith("/interrupt")) {
+        res.writeHead(204);
+        res.end();
         return;
       }
 
-      if (parsed.pathname === "/session/status") {
-        json(res, 200, {});
+      if (parsed.pathname === "/api/session/active") {
+        json(res, 200, { data: {} });
         return;
       }
-      if (parsed.pathname === "/permission" || parsed.pathname === "/question") {
-        json(res, 200, []);
+      if (parsed.pathname === "/api/permission/request" || parsed.pathname === "/api/form") {
+        json(res, 200, { location: { directory: directory || WORK_DIR }, data: [] });
         return;
       }
 
@@ -274,10 +292,10 @@ function spawnEnv(baseUrl: string, extra: Record<string, string> = {}): Record<s
   env.OPENCODE_DEFAULT_PROVIDER = MODEL.providerID;
   env.OPENCODE_DEFAULT_MODEL = MODEL.modelID;
   env.OPENCODE_REQUIRE_EXPLICIT_MODEL = "true";
+  env.OPENCODE_SERVER_PASSWORD = "stdio-fake-pw";
   env.OPENCODE_ALLOWED_MODELS = JSON.stringify([
     `${MODEL.providerID}/${MODEL.modelID}`,
   ]);
-  delete env.OPENCODE_SERVER_PASSWORD;
   Object.assign(env, extra);
   return env;
 }
@@ -380,7 +398,7 @@ describe("Layer B MCP stdio subprocess", () => {
     expect(jsonResult).toHaveProperty("observedModel");
     expect(jsonResult).toHaveProperty("content");
     expect(jsonResult).toHaveProperty("safeToResubmit");
-    const promptPosts = fake.requests.filter((req) => req.pathname.endsWith("/prompt_async"));
+    const promptPosts = fake.requests.filter((req) => req.pathname.endsWith("/prompt"));
     expect(promptPosts).toHaveLength(1);
 
     const created = await bridge.client.callTool({
@@ -400,7 +418,7 @@ describe("Layer B MCP stdio subprocess", () => {
     expect(command.isError).not.toBe(true);
     const commandPosts = fake.requests.filter((req) => req.pathname.endsWith("/command"));
     expect(commandPosts).toHaveLength(1);
-    expect(commandPosts[0]?.json).toMatchObject({ command: "init", arguments: "" });
+    expect(commandPosts[0]?.json).toMatchObject({ name: "init", text: "" });
   });
 
   it("FUP-013: accepted-but-failed fire is an MCP error and is not described as working autonomously", async () => {
@@ -425,11 +443,11 @@ describe("Layer B MCP stdio subprocess", () => {
     expect(String(jsonResult.error)).toMatch(/ProviderAuthError/);
     expect(text).not.toMatch(/working autonomously/i);
     expect(fake.mutationCount()).toBeGreaterThanOrEqual(2);
-    const laterPrompt = fake.requests.filter((req) => req.pathname.endsWith("/prompt_async"));
+    const laterPrompt = fake.requests.filter((req) => req.pathname.endsWith("/prompt"));
     expect(laterPrompt).toHaveLength(1);
   });
 
-  it("FUP-054: dropped prompt_async is recorded once and reported as unknown acceptance", async () => {
+  it("FUP-054: a single fire records exactly one v2 prompt POST and reported as unknown acceptance", async () => {
     fake = await startFake();
     bridge = await connectBridge(fake.baseUrl);
     // Destroy the next prompt_async by wrapping: mark a drop via closing the
@@ -446,10 +464,10 @@ describe("Layer B MCP stdio subprocess", () => {
       },
     });
     parseTaskJson(textOf(first));
-    expect(fake.requests.filter((req) => req.pathname.endsWith("/prompt_async"))).toHaveLength(1);
+    expect(fake.requests.filter((req) => req.pathname.endsWith("/prompt"))).toHaveLength(1);
   });
 
-  it("FUP-042: cancelling wait does not POST session abort or replay the prompt", async () => {
+  it("FUP-042: cancelling wait does not POST session interrupt or replay the prompt", async () => {
     fake = await startFake({ assistantMode: "none" });
     bridge = await connectBridge(fake.baseUrl);
     const fired = await bridge.client.callTool({
@@ -462,7 +480,7 @@ describe("Layer B MCP stdio subprocess", () => {
       },
     });
     const handle = parseTaskJson(textOf(fired));
-    const promptCount = fake.requests.filter((req) => req.pathname.endsWith("/prompt_async")).length;
+    const promptCount = fake.requests.filter((req) => req.pathname.endsWith("/prompt")).length;
     const controller = new AbortController();
     const waiting = bridge.client.callTool(
       {
@@ -479,8 +497,8 @@ describe("Layer B MCP stdio subprocess", () => {
     await new Promise((resolve) => setTimeout(resolve, 80));
     controller.abort();
     await expect(waiting).rejects.toThrow();
-    expect(fake.requests.some((req) => req.pathname.endsWith("/abort"))).toBe(false);
-    expect(fake.requests.filter((req) => req.pathname.endsWith("/prompt_async"))).toHaveLength(
+    expect(fake.requests.some((req) => req.pathname.endsWith("/interrupt"))).toBe(false);
+    expect(fake.requests.filter((req) => req.pathname.endsWith("/prompt"))).toHaveLength(
       promptCount,
     );
   });
@@ -507,7 +525,13 @@ describe("Layer B MCP stdio subprocess", () => {
     });
     expect(init.isError).toBe(true);
     expect(textOf(init)).toMatch(/variant is not supported for init/i);
-    expect(fake.requests.filter((req) => req.pathname.endsWith("/init"))).toHaveLength(0);
+    expect(
+      fake.requests.filter(
+        (req) =>
+          req.pathname.endsWith("/command") &&
+          (req.json as { name?: string } | undefined)?.name === "init",
+      ),
+    ).toHaveLength(0);
   });
 });
 

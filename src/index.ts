@@ -31,7 +31,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { OpenCodeClient } from "./client.js";
-import { ensureServer } from "./server-manager.js";
+import { ensureServer, generateServerPassword } from "./server-manager.js";
 import { setModelDefaults } from "./helpers.js";
 import { validateStartupModelConfig } from "./model-selection.js";
 
@@ -56,8 +56,16 @@ import { registerPrompts } from "./prompts.js";
 const baseUrl =
   process.env.OPENCODE_BASE_URL ?? "http://127.0.0.1:4096";
 const username = process.env.OPENCODE_SERVER_USERNAME;
-const password = process.env.OPENCODE_SERVER_PASSWORD;
 const autoServe = process.env.OPENCODE_AUTO_SERVE !== "false";
+// OpenCode v2 always requires Basic auth. When the bridge may auto-start
+// the server and no password is configured, generate one up front so the
+// managed child and this client share it. Against an externally managed
+// server, users must set OPENCODE_SERVER_PASSWORD to that server's
+// password (`opencode service get password` / the value it was started
+// with); a generated password will simply fail auth there, clearly.
+const password =
+  process.env.OPENCODE_SERVER_PASSWORD ??
+  (autoServe ? generateServerPassword() : undefined);
 const defaultProvider = process.env.OPENCODE_DEFAULT_PROVIDER;
 const defaultModel = process.env.OPENCODE_DEFAULT_MODEL;
 
@@ -81,7 +89,7 @@ const client = new OpenCodeClient({ baseUrl, username, password, autoServe });
 const server = new McpServer(
   {
     name: "opencode-mcp",
-    version: "1.12.0",
+    version: "2.0.0",
     description:
       "MCP server wrapping the OpenCode AI coding agent. " +
       "Delegates complex coding tasks (build apps, refactor, debug) to an autonomous AI agent. " +
@@ -112,7 +120,7 @@ const server = new McpServer(
       "- `opencode_fire` — accepted dispatch only: returns jobId + sessionId + requestMessageID + directory immediately. The model may still be running.",
       "- `opencode_check` — observe that handle (prefer jobId, or sessionId + requestMessageID + directory). Idle/absent status is not success. (read-only)",
       "- `opencode_wait` — wait on the same handle until terminal, blocked, timed out, or cancelled. Timeout does not abort server-side work.",
-      "- `opencode_session_todo` — see the agent's internal task list for a session (read-only)",
+      "- `opencode_session_todo` — not available on OpenCode v2 (no todo endpoint); use `opencode_check` state instead",
       "",
       "### Tier 3 — Monitoring & Review",
       "- `opencode_review_changes` — see all file diffs from a session (read-only)",
@@ -130,7 +138,7 @@ const server = new McpServer(
       "- `opencode_provider_*` — manage providers, auth, OAuth flows",
       "",
       "### Tier 5 — Specialist (rarely needed)",
-      "- `opencode_tui_*` — control the terminal UI (only if a TUI is running)",
+      "- `opencode_tui_*` — not available on OpenCode v2 (no remote TUI-control endpoints)",
       "- `opencode_events_poll` — poll raw SSE events",
       "- `opencode_mcp_*` — manage MCP servers inside OpenCode",
       "- `opencode_instance_dispose` — shut down the server (DESTRUCTIVE!)",
@@ -171,7 +179,7 @@ const server = new McpServer(
       "- `readOnlyHint` is not a sandbox. A `plan` agent is not guaranteed write-incapable unless OpenCode permissions actually block writes.",
       "- Tools marked with `destructiveHint: true` (`opencode_instance_dispose`, `opencode_session_delete`) permanently delete data — confirm with the user before calling.",
       "- `opencode_fire` returns an accepted handle, not a completed answer. Recover a timed-out job with `opencode_check`/`opencode_wait` using jobId or sessionId + requestMessageID + directory. Do not resubmit after an unknown acceptance.",
-      "- Auto-started OpenCode is an SDK child process on loopback, not an in-process engine. `fire` jobs do not survive this MCP process exiting. Use a separately managed `opencode serve` for shared or long-lived work.",
+      "- Auto-started OpenCode is a child `opencode serve` process on loopback, not an in-process engine. `fire` jobs do not survive this MCP process exiting. Use a separately managed `opencode serve` for shared or long-lived work. This bridge requires OpenCode v2.",
       "- For tasks under 10 minutes, prefer `opencode_run`. For longer tasks, use `opencode_fire` + `opencode_check`/`opencode_wait` on the returned handle.",
     ].join("\n"),
   },
@@ -207,7 +215,8 @@ registerPrompts(server);
 async function main() {
   // Step 1: Ensure OpenCode server is available (auto-start if needed).
   try {
-    await ensureServer({ baseUrl, autoServe, username, password });
+    const ensured = await ensureServer({ baseUrl, autoServe, username, password });
+    if (ensured.password) client.setCredentials(username, ensured.password);
   } catch (err) {
     // Log the error but don't prevent MCP from starting — tools will
     // report connection errors individually, and the server may come
@@ -224,7 +233,7 @@ async function main() {
     ? ` | defaults: ${defaultProvider}/${defaultModel}`
     : "";
   console.error(
-    `opencode-mcp v1.12.0 started (OpenCode server at ${baseUrl}${defaultsInfo})`,
+    `opencode-mcp v2.0.0 started (OpenCode v2 server at ${baseUrl}${defaultsInfo})`,
   );
 }
 

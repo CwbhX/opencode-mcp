@@ -9,19 +9,19 @@ server URL/auth, or you want a default / allowlisted model pair.
 |---|---|---|---|
 | `OPENCODE_BASE_URL` | URL of the OpenCode headless server | `http://127.0.0.1:4096` | No |
 | `OPENCODE_SERVER_USERNAME` | HTTP basic auth username | `opencode` | No |
-| `OPENCODE_SERVER_PASSWORD` | HTTP basic auth password | *(none — auth disabled)* | No |
-| `OPENCODE_AUTO_SERVE` | Auto-start an SDK child on **loopback** only when the health probe is connection-refused. Generic `fetch failed` / 401 do not spawn. | `true` | No |
+| `OPENCODE_SERVER_PASSWORD` | HTTP basic auth password (v2 always requires it; generated when the bridge auto-starts the server) | *(generated on auto-start)* | Required for external servers |
+| `OPENCODE_AUTO_SERVE` | Auto-start `opencode serve` on **loopback** only when the health probe is connection-refused. Generic `fetch failed` / 401 do not spawn. | `true` | No |
 | `OPENCODE_DEFAULT_PROVIDER` | Default provider ID when not specified per-tool | *(none)* | No (must pair with model) |
 | `OPENCODE_DEFAULT_MODEL` | Default model ID when not specified per-tool | *(none)* | No (must pair with provider) |
 | `OPENCODE_REQUIRE_EXPLICIT_MODEL` | When `true`, require an explicit or configured full provider/model pair | *(unset)* | No |
 | `OPENCODE_ALLOWED_MODELS` | JSON array of allowed `provider/model` strings | *(unset)* | No |
 | `OPENCODE_MCP_LIVE_TEST` | Set to `1` to run `npm run test:live`. Opt-in with missing URL/model config fails. | *(unset)* | Test only |
 | `OPENCODE_MCP_SERVER_TEST` | Set to `1` to enable Layer C tagged-server tests | *(unset)* | Test only |
-| `OPENCODE_MCP_SERVER_BINARY` | Absolute path to the OpenCode executable for Layer C (must report `1.18.29`) | *(unset)* | Test only |
+| `OPENCODE_MCP_SERVER_BINARY` | Absolute path to the OpenCode v2 executable for Layer C (must report a 2.x version, or the exact OPENCODE_MCP_SERVER_TARGET_VERSION) | *(unset)* | Test only |
 
 ### Notes
 
-- **Authentication is disabled by default.** It only activates when `OPENCODE_SERVER_PASSWORD` is set on both the OpenCode server and the MCP server.
+- **Authentication is always on in OpenCode v2.** `opencode serve` requires Basic auth. Set `OPENCODE_SERVER_PASSWORD` to the server's password, or let the bridge auto-start OpenCode (it generates a password and uses it for both the child and the client). The auto-start binary comes from `OPENCODE_BINARY` or PATH and must be OpenCode v2.
 - **Username and password are both optional.** The default username is `opencode`, matching the OpenCode server's default. You only need to set these if you've explicitly enabled auth on the server.
 - **The base URL** should point to where `opencode serve` is listening. If running on the same machine with default settings, you don't need to set this.
 - **Default provider/model** are optional. When set, tools that accept `providerID`/`modelID` use this pair when the call omits both. A single identifier (caller or default) is **rejected** and is not merged with the other side. There is no paid-model fallback and no hardcoded free-model list. Discover current models and thinking/effort variant keys with `opencode_setup` / `opencode_provider_list` / `opencode_provider_models`. `variant` is a per-call tool argument, not an environment variable.
@@ -240,7 +240,7 @@ When auto-start is left on, the bridge probes
 
 - **Healthy** — attach; do not spawn.
 - **Connection refused on loopback** (`127.0.0.1`, `localhost`, `::1`) — start
-  an OpenCode **SDK child process**. This is not an in-process engine.
+  a spawned `opencode serve` **child process**. This is not an in-process engine.
   `opencode_fire` work does not survive this MCP process exiting.
 - **401/403, HTML, timeout, TLS/DNS, generic `fetch failed`, or a remote host**
   — fail with a classified error. **401 does not spawn** another server.

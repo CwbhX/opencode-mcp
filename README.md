@@ -16,7 +16,7 @@ It ships 83 tools, 10 resources, and 6 prompts, works across multiple projects a
 
 OpenCode's server API changed, and the original project still speaks the old one. Against a current OpenCode install you get tasks that look finished when they are not, prompts that occasionally get sent twice, and no way to answer when OpenCode stops to ask you something.
 
-This fork tracks OpenCode 1.18 and fixes those problems. In practice that means:
+This fork tracks OpenCode **v2** (verified against v2.0.28) and fixes those problems. OpenCode v2 is required — a v1 server is detected and reported as incompatible rather than driven with the wrong API. In practice that means:
 
 - Background work is tracked until it really finishes. An idle session is not the same as a done session.
 - When OpenCode asks a question or needs permission, that question comes back to you. Nothing gets auto-approved just to make the wait succeed.
@@ -39,13 +39,16 @@ The full endpoint inventory and known limitations are in [Compatibility](docs/co
 
 ## Quick start
 
-You need [OpenCode](https://opencode.ai/) installed first. Any of these will do:
+You need [OpenCode](https://opencode.ai/) **v2** installed first:
 
 ```bash
 curl -fsSL https://opencode.ai/install | bash
-npm i -g opencode-ai
-brew install sst/tap/opencode
+npm i -g @opencode/cli
 ```
+
+Already on OpenCode 1.x? Upgrade with `opencode upgrade --major`. Verify
+with `opencode --version` — it must report a 2.x version. The v1
+`opencode-ai` npm package will not work with this bridge.
 
 Then add the bridge to your client.
 
@@ -74,15 +77,15 @@ That is enough for a first try. The bridge will start OpenCode on loopback if no
 
 ```
 MCP Client  <--stdio-->  opencode-mcp  <--HTTP-->  OpenCode Server
-(Claude, Cursor, etc.)   (this package)            (SDK child on loopback,
+(Claude, Cursor, etc.)   (this package)            (child `opencode serve` on loopback,
                                                     or external opencode serve)
 ```
 
 Your client calls tools over stdio. This server turns them into HTTP requests against the OpenCode headless API.
 
-On startup the bridge probes the server's health. If the connection is refused and `OPENCODE_BASE_URL` points at loopback, it starts an OpenCode process through `@opencode-ai/sdk`. That child runs in a separate process, so jobs started with `opencode_fire` die when the MCP process exits. A 401 or 403 never triggers a spawn. If you want shared or long-lived work, run `opencode serve` yourself.
+On startup the bridge probes the server's health. If the connection is refused and `OPENCODE_BASE_URL` points at loopback, it spawns `opencode serve` directly (binary from `OPENCODE_BINARY` or PATH) with a generated server password, since v2 always requires Basic auth. That child runs in a separate process, so jobs started with `opencode_fire` die when the MCP process exits. A 401 or 403 never triggers a spawn. If you want shared or long-lived work, run `opencode serve` yourself.
 
-Every tool takes an optional `directory`. It has to be an absolute path to a directory that already exists. `~` and relative paths are rejected. When present, it is sent as the `x-opencode-directory` header. When absent, OpenCode falls back to its own project context, not the bridge's working directory.
+Every tool takes an optional `directory`. It has to be an absolute path to a directory that already exists. `~` and relative paths are rejected. When present, it scopes the request via v2's `location[directory]` parameter. When absent, OpenCode falls back to its own project context, not the bridge's working directory.
 
 ## Tools
 
@@ -149,7 +152,7 @@ Omit `variant` to get the model's default. There is no global thinking enum to g
 | [Question](docs/tools.md#question-tools) | 3 | List, reply to, or reject pending questions from OpenCode |
 | [File & Search](docs/tools.md#file--search-tools) | 6 | Search text and regex, find files and symbols, read files |
 | [System](docs/tools.md#system--monitoring-tools) | 13 | Health, VCS, LSP, MCP servers, agents, logging |
-| [TUI Control](docs/tools.md#tui-control-tools) | 9 | Remote-control an attached OpenCode TUI (only when one is attached) |
+| [TUI Control](docs/tools.md#tui-control-tools) | 9 | Not available on OpenCode v2 (no remote TUI-control endpoints); these tools return a clear error |
 | [Provider & Auth](docs/tools.md#provider--auth-tools) | 6 | List providers, models, and variants; set API keys; OAuth |
 | [Config](docs/tools.md#config-tools) | 3 | Get and update configuration |
 | [Project](docs/tools.md#project-tools) | 3 | List, inspect, and initialize projects |
@@ -207,28 +210,30 @@ opencode_run({ directory: "/home/user/new-project", prompt: "Set up a Vite + Rea
 
 The default auto-start is fine for trying things out. For real use, run OpenCode yourself and attach to it. Background jobs then survive your MCP client restarting, and several clients can share the same server.
 
-Start the server:
+Start the server with a stable password (v2 always requires Basic auth;
+without one it generates and prints a new password on every start):
 
 ```bash
-opencode serve --port 4096 --hostname 127.0.0.1
+OPENCODE_SERVER_PASSWORD="choose-a-password" opencode serve --port 4096 --hostname 127.0.0.1
 ```
 
-Then tell the bridge to attach and never spawn:
+Then tell the bridge to attach with the same password and never spawn:
 
 ```json
 {
   "env": {
     "OPENCODE_AUTO_SERVE": "false",
     "OPENCODE_BASE_URL": "http://127.0.0.1:4096",
-    "OPENCODE_DEFAULT_PROVIDER": "opencode",
-    "OPENCODE_DEFAULT_MODEL": "muse-spark-1.3-contributor-free",
+    "OPENCODE_SERVER_PASSWORD": "choose-a-password",
+    "OPENCODE_DEFAULT_PROVIDER": "<your-provider>",
+    "OPENCODE_DEFAULT_MODEL": "<your-model>",
     "OPENCODE_REQUIRE_EXPLICIT_MODEL": "true",
-    "OPENCODE_ALLOWED_MODELS": "[\"opencode/muse-spark-1.3-contributor-free\"]"
+    "OPENCODE_ALLOWED_MODELS": "[\"<your-provider>/<your-model>\"]"
   }
 }
 ```
 
-The last three lines are optional. They pin a default model, refuse calls that do not name a full provider/model pair, and reject anything outside the allowlist.
+The last four lines are optional. They pin a default model, refuse calls that do not name a full provider/model pair, and reject anything outside the allowlist. Discover real provider/model ids with `opencode_setup` and `opencode_provider_models`.
 
 A few things worth knowing:
 
@@ -244,8 +249,9 @@ All optional. You only need them if you changed something on the OpenCode side.
 |---|---|---|
 | `OPENCODE_BASE_URL` | `http://127.0.0.1:4096` | OpenCode server URL |
 | `OPENCODE_SERVER_USERNAME` | `opencode` | HTTP basic auth username |
-| `OPENCODE_SERVER_PASSWORD` | *(none)* | HTTP basic auth password. Setting it turns auth on. |
-| `OPENCODE_AUTO_SERVE` | `true` | Start an SDK child on loopback when the health probe is refused. 401, HTML, TLS, DNS, and generic `fetch failed` errors never spawn. |
+| `OPENCODE_SERVER_PASSWORD` | *(generated when auto-starting)* | HTTP basic auth password. OpenCode v2 always requires it: set it to your external server's password, or let auto-start generate one for the managed child. |
+| `OPENCODE_BINARY` | `opencode` (PATH) | Absolute path to the OpenCode **v2** binary used for auto-start. |
+| `OPENCODE_AUTO_SERVE` | `true` | Spawn `opencode serve` on loopback when the health probe is refused. 401, HTML, TLS, DNS, and generic `fetch failed` errors never spawn. |
 | `OPENCODE_DEFAULT_PROVIDER` | *(none)* | Default provider ID. Set together with `OPENCODE_DEFAULT_MODEL`. |
 | `OPENCODE_DEFAULT_MODEL` | *(none)* | Default model ID. Set together with `OPENCODE_DEFAULT_PROVIDER`. |
 | `OPENCODE_REQUIRE_EXPLICIT_MODEL` | *(unset)* | When `true`, every call needs an explicit or configured provider/model pair. |
@@ -253,7 +259,7 @@ All optional. You only need them if you changed something on the OpenCode side.
 
 ### What has been verified
 
-Tested against OpenCode v1.18.29: an isolated tagged-server `session_create` through MCP, and one live `opencode_fire` then `opencode_wait` round trip with `opencode/muse-spark-1.3-contributor-free`. The requested model matched the one that ran, and the job reported `state=succeeded`.
+Tested against OpenCode v2.0.28: an isolated tagged-server `session_create` through MCP, one live `opencode_fire` then `opencode_wait` round trip with `openrouter/meta/muse-spark-open` (requested model matched the one that ran, `state=succeeded`), plus a manual MCP exercise (setup, ask, files, providers) against an auto-started server.
 
 That is a smoke test, not a guarantee for every tool, host OS, remote filesystem, or newer OpenCode version. Two known edges: path segments containing a literal `%` are rejected, and the bridge's model allowlist does not reach OpenCode subagents, title generation, or config changed outside this process.
 
@@ -281,7 +287,7 @@ npm run test:live    # Layer D: skipped without opt-in; fails if opted in but mi
 Layer C runs against a real OpenCode binary. If you opt in without one, it fails rather than skipping:
 
 ```bash
-OPENCODE_MCP_SERVER_BINARY=/absolute/path/to/opencode-1.18.29 \
+OPENCODE_MCP_SERVER_BINARY=/absolute/path/to/opencode-v2 \
 OPENCODE_MCP_SERVER_TEST=1 \
 npm run test:server
 ```
@@ -292,10 +298,11 @@ Layer D talks to a live model from a scratch directory, not this repo:
 OPENCODE_MCP_LIVE_TEST=1 \
 OPENCODE_AUTO_SERVE=false \
 OPENCODE_BASE_URL=http://127.0.0.1:4096 \
-OPENCODE_DEFAULT_PROVIDER=opencode \
-OPENCODE_DEFAULT_MODEL=muse-spark-1.3-contributor-free \
+OPENCODE_SERVER_PASSWORD="choose-a-password" \
+OPENCODE_DEFAULT_PROVIDER=<your-provider> \
+OPENCODE_DEFAULT_MODEL=<your-model> \
 OPENCODE_REQUIRE_EXPLICIT_MODEL=true \
-OPENCODE_ALLOWED_MODELS='["opencode/muse-spark-1.3-contributor-free"]' \
+OPENCODE_ALLOWED_MODELS='["<your-provider>/<your-model>"]' \
 npm run test:live
 ```
 

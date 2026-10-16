@@ -1,4 +1,5 @@
-import { createOpencodeServer } from "@opencode-ai/sdk";
+import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import type { HealthClassification } from "./bridge-types.js";
 
 export interface ServerManagerOptions {
@@ -21,6 +22,11 @@ export interface ServerStatus {
   version?: string;
   managedByUs: boolean;
   url?: string;
+  /**
+   * Password the client must use for the (managed) server. Set when a
+   * managed v2 server was started with a bridge-generated password.
+   */
+  password?: string;
 }
 
 export interface ClassifiedProbe {
@@ -239,13 +245,15 @@ async function classifyHttpResponse(
 
   try {
     const body = (await response.json()) as unknown;
-    if (body && typeof body === "object" && "healthy" in body) {
-      const rec = body as { healthy?: unknown; version?: unknown };
+    if (body && typeof body === "object" && "version" in body) {
+      const rec = body as { version?: unknown; urls?: unknown };
       const version = typeof rec.version === "string" ? rec.version : undefined;
-      if (rec.healthy === true) {
+      // v2 /api/info answers { version: "2.x.y", urls: [...] }. Anything
+      // else (including a v1 server) is not a server this bridge can use.
+      if (version !== undefined && version.startsWith("2.") && Array.isArray(rec.urls)) {
         return { classification: "healthy", version, status };
       }
-      return { classification: "reachable_but_unhealthy", version, status };
+      return { classification: "incompatible_response", version, status };
     }
     return { classification: "incompatible_response", status };
   } catch {
@@ -278,8 +286,9 @@ function describeUnhealthyProbe(safeUrl: string, probe: ClassifiedProbe): string
       );
     case "incompatible_response":
       return (
-        `OpenCode health probe at ${safeUrl} returned an incompatible response (HTML, non-JSON, or missing healthy field). ` +
-        `The process on that port does not look like OpenCode. The bridge will not start another server.`
+        `OpenCode health probe at ${safeUrl} returned an incompatible response. ` +
+        `This bridge requires an OpenCode v2 server (GET /api/info reporting version 2.x); ` +
+        `a v1 server or a non-OpenCode process on that port will not work. The bridge will not start another server.`
       );
     case "reachable_but_unhealthy":
       return (
@@ -296,10 +305,14 @@ function wrapStartError(err: unknown): Error {
   const message = err instanceof Error ? err.message : String(err);
   if (/ENOENT|not found/i.test(message)) {
     return new Error(
-      `${message}. The opencode executable was not found on PATH. Install OpenCode or configure an absolute executable path.`,
+      `${message}. The opencode (v2) executable was not found. Install OpenCode v2 (@opencode/cli) or set OPENCODE_BINARY to its absolute path.`,
     );
   }
   return err instanceof Error ? err : new Error(message);
+}
+
+export function generateServerPassword(): string {
+  return randomBytes(24).toString("base64url");
 }
 
 function closeCreatedServer(created: { close(): void }): void {
@@ -330,7 +343,7 @@ let shutdownRegistered = false;
  */
 const startServerInFlight = new Map<
   string,
-  Promise<{ url: string; version?: string }>
+  Promise<{ url: string; version?: string; password: string }>
 >();
 
 function registerShutdownHandlers(): void {
@@ -375,7 +388,7 @@ export async function probeHealth(
       opts?.deadlineAt !== undefined
         ? Math.max(1, opts.deadlineAt - performance.now())
         : timeoutMs;
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/global/health`, {
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/info`, {
       method: "GET",
       headers,
       signal: combinedAbortSignal(
@@ -409,14 +422,92 @@ export async function isServerRunning(
   return { healthy: false };
 }
 
+/**
+ * Spawn `opencode serve` (v2) as a child process. v2 always requires
+ * Basic auth, so the child is started with `OPENCODE_SERVER_PASSWORD`
+ * set to the configured (or generated) password; the caller hands the
+ * same password to the client. The binary comes from `OPENCODE_BINARY`
+ * or PATH (`opencode`).
+ */
+async function spawnV2Server(
+  hostname: string,
+  port: number,
+  password: string,
+  timeoutMs: number,
+): Promise<{ url: string; close(): void }> {
+  const binary = process.env.OPENCODE_BINARY || "opencode";
+  const url = `http://${hostname}:${port}`;
+  const child: ChildProcess = spawn(
+    binary,
+    ["serve", "--hostname", hostname, "--port", String(port)],
+    {
+      env: { ...process.env, OPENCODE_SERVER_PASSWORD: password },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  let output = "";
+  const capture = (chunk: Buffer) => {
+    output = (output + chunk.toString()).slice(-4096);
+  };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+
+  const close = () => {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Already exited.
+    }
+  };
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + timeoutMs;
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(timer);
+        fn();
+      };
+      child.once("error", (err) => finish(() => reject(err)));
+      child.once("exit", (code) =>
+        finish(() =>
+          reject(
+            new Error(
+              `opencode serve exited early (code ${code ?? "?"}). ${output.trim().slice(-500)}`,
+            ),
+          ),
+        ),
+      );
+      const timer = setInterval(() => {
+        if (output.includes("server listening")) {
+          finish(resolve);
+        } else if (Date.now() > deadline) {
+          finish(() =>
+            reject(new Error(`opencode serve did not start within ${timeoutMs}ms.`)),
+          );
+        }
+      }, 100);
+    });
+  } catch (err) {
+    close();
+    throw err;
+  }
+
+  return { url, close };
+}
+
 async function startManagedServer(
   baseUrl: string,
   timeoutMs: number,
   credentials?: { username?: string; password?: string },
-): Promise<{ url: string; version?: string }> {
+): Promise<{ url: string; version?: string; password: string }> {
   const { hostname, port } = parseBaseUrl(baseUrl);
+  const password = credentials?.password ?? generateServerPassword();
 
-  console.error(`Starting OpenCode SDK server on ${hostname}:${port}`);
+  console.error(`Starting OpenCode v2 server on ${hostname}:${port}`);
 
   // Capture into a local so concurrent `startServer` calls (against
   // different baseUrls) don't clobber each other's return values via the
@@ -425,11 +516,7 @@ async function startManagedServer(
   // one this specific call produced.
   let created: { url: string; close(): void } | undefined;
   try {
-    created = await createOpencodeServer({
-      hostname,
-      port,
-      timeout: timeoutMs,
-    });
+    created = await spawnV2Server(hostname, port, password, timeoutMs);
     managedServer = created;
 
     registerShutdownHandlers();
@@ -437,7 +524,7 @@ async function startManagedServer(
     const status = await probeHealth(
       created.url,
       credentials?.username,
-      credentials?.password,
+      password,
     );
     if (status.classification !== "healthy") {
       throw new Error(
@@ -446,7 +533,7 @@ async function startManagedServer(
           `. The child was closed and is not reported ready.`,
       );
     }
-    return { url: created.url, version: status.version };
+    return { url: created.url, version: status.version, password };
   } catch (err) {
     if (created) {
       closeCreatedServer(created);
@@ -542,5 +629,6 @@ export async function ensureServer(
     version: result.version,
     managedByUs: true,
     url: result.url,
+    password: result.password,
   };
 }

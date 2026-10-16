@@ -5,7 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-10-16
+
+Ported to the **OpenCode v2** server API (verified against v2.0.28). OpenCode
+v1 servers are no longer supported: the health probe requires `GET /api/info`
+reporting a 2.x version and reports anything else as incompatible.
+
+### Changed
+
+- All wire traffic now uses the v2 API: `/api/...` routes, `{data}`
+  envelopes, `location[directory]` scoping instead of the
+  `x-opencode-directory` header, per-session model/agent selection,
+  async prompts with `{id, text}` bodies, `/api/session/active` status,
+  forms in place of questions, and `/api/event` SSE envelopes.
+  Translation lives in `src/client.ts` + `src/v2-adapt.ts`; the MCP tool
+  surface (83 tools, 10 resources, 6 prompts) and the job-handle
+  contract (`fire` → `check`/`wait`, absence ≠ Done, no auto-approval,
+  no mutation replay) are unchanged.
+- Authentication is mandatory (v2 `serve` always requires Basic auth).
+  Auto-start now spawns `opencode serve` directly (`OPENCODE_BINARY` or
+  PATH) with the configured or a generated `OPENCODE_SERVER_PASSWORD`;
+  the `@opencode-ai/sdk` dependency is gone.
+- Model variants are read from the v2 catalog's per-model `variants`
+  array; reasoning traces are no longer included in formatted answers.
+- Tools with no v2 equivalent — `opencode_tui_*`, `opencode_session_todo`,
+  session share/unshare, `opencode_find_text`, `opencode_find_symbol`,
+  LSP/formatter status, experimental tool listing, and `opencode_log` —
+  now fail with an explicit "not available on OpenCode v2" error.
+  `opencode_config_update` only accepts `{shell}`, matching the v2
+  config patch endpoint.
+
+### Verified
+
+- `tsc --noEmit` clean; full unit suite green including new
+  `tests/v2-client.test.ts` translation coverage.
+- Layer B wire + MCP stdio suites rewritten to strict v2 fakes.
+- Layer C against the real v2.0.28 binary; Layer D live smoke
+  (`fire` → `wait`, requested = observed model) passed.
+
+## [Unreleased — pre-2.0 work on the 1.12.0 line]
 
 Follow-up repairs on the 1.12.0 OpenCode ~1.18 bridge. Historical 1.12.0 notes
 below are unchanged; they describe the earlier commit, not these fixes.
